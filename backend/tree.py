@@ -74,9 +74,8 @@ class Thought:
             raise ValueError("Thought rationale must be a non-empty string")
         if not (0 <= self.confidence <= 1):
             raise ValueError(f"Confidence must be in [0, 1], got {self.confidence}")
-        valid_intents = ["propose", "decompose", "check", "compute", "decide", 
-                        "analyze", "solve", "clarify", "verify", "optimize", 
-                        "explore", "reframe", "experiment", "mitigate", "investigate", "conclude"]
+        # Restrict to the new, simplified intent set
+        valid_intents = ["idea", "answer"]
         if self.intent not in valid_intents:
             raise ValueError(f"Invalid intent: {self.intent}")
 
@@ -143,34 +142,19 @@ class SubProblemNode:
             "id": f"node_{id(self)}",
             "depth": self.depth,
             "subproblem": self.state.subproblem_text,
-            "chain_of_thought": [{
-                "text": t.text,
-                "rationale": t.rationale,
-                "confidence": t.confidence,
-                "intent": t.intent,
-                "candidate": t.candidate
-            } for t in self.state.scratchpad],
-            "generated_thoughts": [{
-                "text": t.text,
-                "rationale": t.rationale,
-                "confidence": t.confidence,
-                "intent": t.intent,
-                "candidate": t.candidate,
-                "score": self.thought_scores.get(t.text, 0.0)
-            } for t in self.generated_thoughts],
-            "candidate_solution": self.state.candidate_solution,
-            "value_estimate": self.value_estimate,
-            "terminal_status": self.terminal_status,
-            "processing_status": self.processing_status,
-            "input_context": self.input_context,
+            "chain_of_thought_text": "\n".join(t.text for t in self.state.scratchpad),
+            "generated_thoughts": [
+                {
+                    "text": t.text,
+                    "rationale": t.rationale,
+                    "score": self.thought_scores.get(t.text, 0.0)
+                }
+                for t in self.generated_thoughts
+            ],
+            "incoming_thought_text": self.incoming_thought.text if self.incoming_thought else None,
             "children_count": len(self.children),
-            "incoming_thought": {
-                "text": self.incoming_thought.text,
-                "rationale": self.incoming_thought.rationale,
-                "confidence": self.incoming_thought.confidence,
-                "intent": self.incoming_thought.intent,
-                "candidate": self.incoming_thought.candidate
-            } if self.incoming_thought else None
+            "processing_status": self.processing_status,
+            "terminal_status": self.terminal_status
         }
 
 
@@ -356,7 +340,8 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         context = build_context_string(state.scratchpad, state.candidate_solution)
         
         # Format max ideas hint
-        max_hint = f" (aim for {max_ideas} strong insights)" if max_ideas else ""
+        # New prompt expects a number directly in the sentence (e.g., "the 3 most important insights")
+        max_hint = str(max_ideas) if max_ideas else "3"
         
         # Get template and format it
         template = PROMPTS["thought_generation"]
@@ -392,6 +377,12 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             "temperature": self.config.temperature,
             "max_tokens": 1000
         }
+        # Log request (without API key)
+        try:
+            logger.info("    🌐 POST /chat/completions (generation)")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+        except Exception:
+            pass
         
         async with session.post(
             f"{self.base_url}/chat/completions",
@@ -401,9 +392,18 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
+                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
                 raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
             
             result = await response.json()
+            # Log raw JSON (truncated)
+            try:
+                raw_str = json.dumps(result)[:2000]
+                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+                for line in raw_str.split('\n'):
+                    logger.info(f"    {line}")
+            except Exception:
+                pass
             if "choices" not in result or not result["choices"]:
                 raise RuntimeError("No choices in Cerebras response")
             
@@ -436,6 +436,11 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             "max_tokens": 1000,
             "stream": True
         }
+        try:
+            logger.info("    🌐 POST /chat/completions (generation streaming)")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=True")
+        except Exception:
+            pass
         
         async with session.post(
             f"{self.base_url}/chat/completions",
@@ -445,6 +450,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
+                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
                 raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
             
             collected_content = ""
@@ -460,26 +466,33 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                         
                         if "choices" in chunk and chunk["choices"]:
                             delta = chunk["choices"][0].get("delta", {})
+                            # Append both content and reasoning tokens if present
                             if "content" in delta:
-                                content = delta["content"]
-                                collected_content += content
-                                
-                                # Try to parse thoughts from accumulated content
-                                # This is a simple approach - in practice you might want more sophisticated parsing
-                                if collected_content.count('\n\n') > 0 or "Confidence:" in collected_content:
-                                    thoughts = self._parse_thoughts(collected_content)
-                                    for thought in thoughts:
-                                        yield thought
-                                    collected_content = ""  # Reset for next thought
-                                    
+                                collected_content += delta["content"]
+                            if "reasoning" in delta:
+                                collected_content += delta["reasoning"]
                     except json.JSONDecodeError:
                         continue
             
-            # Parse any remaining content
+            # After stream completion, log once and parse once
             if collected_content.strip():
+                logger.info(f"    📥 THOUGHTS (stream final):")
+                logger.info(f"    {'-'*50}")
+                for line in collected_content.split('\n'):
+                    logger.info(f"    {line}")
+                logger.info(f"    {'-'*50}")
                 thoughts = self._parse_thoughts(collected_content)
                 for thought in thoughts:
                     yield thought
+            else:
+                # Fallback: try non-streaming call if nothing was collected
+                try:
+                    response_text = await self._call_cerebras_async(prompt)
+                    thoughts = self._parse_thoughts(response_text)
+                    for thought in thoughts:
+                        yield thought
+                except Exception:
+                    return
     
     def _parse_thoughts(self, text: str) -> List[Thought]:
         """Parse thoughts from Cerebras response."""
@@ -492,13 +505,14 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         
         thoughts = []
         
-        # Split into numbered items
-        items = re.split(r'\n\s*\d+\.\s*', text)
+        # Split into items. Support markdown-bold numbering (e.g., **1. ...**) and HR separators (---).
+        numbered_splitter = re.compile(r'^\s*(?:\*\*)?\d+\.\s*', re.MULTILINE)
+        items = numbered_splitter.split(text)
         if len(items) > 1:
-            items = items[1:]  # Remove text before first numbered item
+            items = [s for s in items[1:] if s.strip()]
         else:
-            # Try alternative splitting
-            items = [text]
+            hr_splitter = re.compile(r'^\s*-{3,}\s*$', re.MULTILINE)
+            items = [s for s in hr_splitter.split(text) if s.strip()] or [text]
         
         for item in items:
             thought = self._parse_single_thought(item.strip())
@@ -510,39 +524,103 @@ class ProposeThoughtGenerator(ThoughtGenerator):
     def _parse_single_thought(self, item: str) -> Optional[Thought]:
         """Parse a single thought from text."""
         try:
-            # Extract fields using regex - support multiple field names
-            idea_match = re.search(r'(?:Idea|Insight|Risk):\s*(.+?)(?=\n|Why:|$)', item, re.IGNORECASE | re.DOTALL)
-            why_match = re.search(r'Why:\s*(.+?)(?=\n|Confidence:|$)', item, re.IGNORECASE | re.DOTALL)
-            conf_match = re.search(r'Confidence:\s*([0-9]*\.?[0-9]+)', item, re.IGNORECASE)
-            intent_match = re.search(r'Intent:\s*(\w+)', item, re.IGNORECASE)
+            metadata: Dict[str, Any] = {"raw_item": item}
+
+            # Primary: New Branch/Why/Answer format
+            branch_match = re.search(r'Branch:\s*(.+?)(?=\n|Why:|\n|$)', item, re.IGNORECASE | re.DOTALL)
+            # Support "Why:" or variants like "Why this matters –"
+            why_match = re.search(r'(?:Why\s*:\s*|\*?Why\s+this\s+matters\*?\s*[–-]\s*)(.+?)(?=\n\s*Answer|\n\s*\*?Insights\*?|\n\s*-{3,}|\n\s*$)', item, re.IGNORECASE | re.DOTALL)
+            # Capture Insights bullet block after an Insights header
+            insights_block_match = re.search(r'\n\s*\*?Insights\*?\s*:?\s*\n(?P<ins>(?:[ \t]*[\-•–].*(?:\n|$))+)', item, re.IGNORECASE)
+            tentative_answer_match = re.search(r'Answer\s*\(tentative\):\s*(.+?)(?=\n\s*\n|\n\s*\d+\.|$)', item, re.IGNORECASE | re.DOTALL)
             answer_match = re.search(r'Answer:\s*(.+?)(?=\n\s*\n|\n\s*\d+\.|$)', item, re.IGNORECASE | re.DOTALL)
-            
-            if not idea_match:
-                return None
-            
-            text = idea_match.group(1).strip()
+
+            # Legacy support: Idea/Insight/Risk
+            legacy_idea_match = re.search(r'(?:Idea|Insight|Risk):\s*(.+?)(?=\n|Why:|$)', item, re.IGNORECASE | re.DOTALL)
+            # Ignore any legacy Confidence fields; we no longer use confidence
+            intent_field_match = re.search(r'Intent:\s*([\w\-]+)', item, re.IGNORECASE)
+
+            text: Optional[str] = None
             rationale = why_match.group(1).strip() if why_match else "No rationale provided"
-            confidence = float(conf_match.group(1)) if conf_match else 0.4
-            intent = intent_match.group(1).lower() if intent_match else "propose"
-            candidate = answer_match.group(1).strip() if answer_match else None
-            
-            # Validate confidence range
+            candidate: Optional[str] = None
+            # We no longer use confidence; set to 0.0 placeholder
+            confidence = 0.0
+
+            # Determine text and candidate from new format first
+            if branch_match:
+                text = branch_match.group(1).strip()
+                if tentative_answer_match:
+                    candidate = tentative_answer_match.group(1).strip()
+                    metadata["tentative_answer"] = True
+                elif answer_match:
+                    candidate = answer_match.group(1).strip()
+            elif legacy_idea_match:
+                text = legacy_idea_match.group(1).strip()
+                # Legacy: try to find Answer: as candidate
+                if answer_match:
+                    candidate = answer_match.group(1).strip()
+                metadata["legacy_format"] = True
+            else:
+                return None
+
+            # Clean markdown artifacts from extracted fields
+            def _strip_md_edges(s: str) -> str:
+                s = s.strip()
+                s = re.sub(r'^\*+\s*', '', s)
+                s = re.sub(r'\s*\*+$', '', s)
+                return s.strip()
+
+            text = _strip_md_edges(text)
+            if candidate:
+                candidate = _strip_md_edges(candidate)
+            if rationale and rationale != "No rationale provided":
+                rationale = _strip_md_edges(rationale)
+
+            # Extract and normalize insights bullets
+            insights_list: Optional[List[str]] = None
+            if insights_block_match:
+                raw_block = insights_block_match.group('ins')
+                lines = [ln.strip() for ln in raw_block.splitlines()]
+                bullets = []
+                for ln in lines:
+                    m = re.match(r'^[\-•–]\s*(.*)$', ln)
+                    if m:
+                        bullets.append(m.group(1).strip())
+                if bullets:
+                    insights_list = bullets
+                    # Combine into rationale if Why was missing or to enrich it
+                    insights_text = "\n".join([f"- {b}" for b in bullets])
+                    if rationale == "No rationale provided":
+                        rationale = f"Insights:\n{insights_text}"
+                    else:
+                        rationale = f"{rationale}\nInsights:\n{insights_text}"
+                    metadata["insights"] = bullets
+
+            # Map or infer intent to the new set {idea, answer}
+            intent_raw = intent_field_match.group(1).strip().lower() if intent_field_match else None
+            intent_mapped = None
+            if intent_raw in {"answer", "solve"}:
+                intent_mapped = "answer"
+            elif intent_raw in {"idea", "analyze", "analysis", "explore", "propose", "check", "compute", "decide", "clarify", "verify", "optimize", "reframe", "experiment", "mitigate", "investigate", "conclude"}:
+                intent_mapped = "idea"
+
+            if intent_mapped is None:
+                # Infer from presence of a definitive Answer (not tentative)
+                if answer_match and not tentative_answer_match:
+                    intent_mapped = "answer"
+                else:
+                    intent_mapped = "idea"
+
+            # Clamp confidence (noop with 0.0 but keep for safety)
             confidence = max(0.0, min(1.0, confidence))
-            
-            # Validate intent - expanded set for new prompt types
-            valid_intents = ["propose", "decompose", "check", "compute", "decide", 
-                           "analyze", "solve", "clarify", "verify", "optimize", 
-                           "explore", "reframe", "experiment", "mitigate", "investigate", "conclude"]
-            if intent not in valid_intents:
-                intent = "analyze"  # Default for insight-based prompts
-            
+
             return Thought(
                 text=text,
                 rationale=rationale,
                 confidence=confidence,
-                intent=intent,
+                intent=intent_mapped,
                 candidate=candidate,
-                metadata={"raw_item": item}
+                metadata=metadata
             )
             
         except Exception as e:
@@ -555,7 +633,8 @@ class RuleBasedIdeaValidator(IdeaValidator):
     
     async def evaluate(self, state: NodeState, thought: Thought) -> float:
         """Evaluate thought using heuristic scoring."""
-        score = thought.confidence
+        # No longer use model-provided confidence; start from neutral baseline
+        score = 0.5
         
         # Check for duplication against scratchpad
         normalized_new = normalize_text(thought.text)
@@ -567,13 +646,10 @@ class RuleBasedIdeaValidator(IdeaValidator):
         if len(thought.text.strip()) < 10:
             return 0.0
         
-        # Boost actionable intents
+        # Boost based on simplified intents
         intent_boosts = {
-            "compute": 0.1,
-            "check": 0.1,
-            "decide": 0.15,
-            "propose": 0.05,
-            "decompose": 0.05
+            "idea": 0.05,
+            "answer": 0.15
         }
         score += intent_boosts.get(thought.intent, 0.0)
         
@@ -640,12 +716,15 @@ class LLMIdeaValidator(IdeaValidator):
             # Build validation prompt
             context = build_context_string(state.scratchpad, state.candidate_solution)
             
+            # Map simplified internal intents to validation prompt intents
+            validation_intent = "solve" if thought.intent == "answer" else "analyze"
+
             prompt = PROMPTS["thought_validation"].format(
                 problem=state.subproblem_text,
                 context=context,
                 thought_text=thought.text,
                 thought_rationale=thought.rationale,
-                thought_intent=thought.intent
+                thought_intent=validation_intent
             )
             
             # Log the validation prompt
@@ -671,8 +750,14 @@ class LLMIdeaValidator(IdeaValidator):
             return score
             
         except Exception as e:
-            logger.warning(f"LLM validation failed: {e}, falling back to confidence score")
-            return thought.confidence
+            logger.warning(f"LLM validation failed: {e}, falling back to rule-based score")
+            # Fallback to rule-based validator instead of confidence
+            try:
+                rb = RuleBasedIdeaValidator()
+                return await rb.evaluate(state, thought)
+            except Exception as inner:
+                logger.warning(f"Rule-based fallback also failed: {inner}; returning neutral 0.5")
+                return 0.5
     
     async def _call_cerebras_async(self, prompt: str) -> str:
         """Make async API call to Cerebras for validation."""
@@ -691,6 +776,12 @@ class LLMIdeaValidator(IdeaValidator):
             "temperature": 0.3,  # Lower temperature for validation
             "max_tokens": 200
         }
+        # Log request (without API key)
+        try:
+            logger.info("    🌐 POST /chat/completions (idea validation)")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+        except Exception:
+            pass
         
         async with session.post(
             f"{self.base_url}/chat/completions",
@@ -700,13 +791,34 @@ class LLMIdeaValidator(IdeaValidator):
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
+                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
                 raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
             
             result = await response.json()
+            # Log raw JSON (truncated)
+            try:
+                raw_str = json.dumps(result)[:2000]
+                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+                for line in raw_str.split('\n'):
+                    logger.info(f"    {line}")
+            except Exception:
+                pass
             if "choices" not in result or not result["choices"]:
                 raise RuntimeError("No choices in Cerebras response")
             
-            return result["choices"][0]["message"]["content"]
+            choice0 = result["choices"][0]
+            # Robustly extract content across possible payload shapes
+            message = choice0.get("message") or {}
+            content = message.get("content")
+            if not content:
+                content = choice0.get("text")
+            if not content:
+                # Some providers may put partials under delta even in non-stream situations
+                delta = choice0.get("delta") or {}
+                content = delta.get("content")
+            if not content:
+                raise KeyError("content")
+            return content
     
     def _parse_validation_score(self, text: str) -> float:
         """Parse validation score from response."""
@@ -716,16 +828,9 @@ class LLMIdeaValidator(IdeaValidator):
             score = float(score_match.group(1))
             return max(0.0, min(1.0, score))  # Clamp to [0, 1]
         
-        # Fallback: look for any number between 0 and 1
-        number_match = re.search(r'\b([0-9]*\.?[0-9]+)\b', text)
-        if number_match:
-            score = float(number_match.group(1))
-            if 0.0 <= score <= 1.0:
-                return score
-        
-        # Default fallback
-        logger.warning(f"Could not parse validation score from: {text[:100]}...")
+        # Fallback: if no score present, return neutral
         return 0.5
+        
 
 
 class LLMSolutionValidator(SolutionValidator):
@@ -819,6 +924,12 @@ class LLMSolutionValidator(SolutionValidator):
             "temperature": 0.1,  # Very low temperature for validation
             "max_tokens": 300
         }
+        # Log request (without API key)
+        try:
+            logger.info("    🌐 POST /chat/completions (solution validation)")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+        except Exception:
+            pass
         
         async with session.post(
             f"{self.base_url}/chat/completions",
@@ -828,13 +939,32 @@ class LLMSolutionValidator(SolutionValidator):
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
+                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
                 raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
             
             result = await response.json()
+            # Log raw JSON (truncated)
+            try:
+                raw_str = json.dumps(result)[:2000]
+                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+                for line in raw_str.split('\n'):
+                    logger.info(f"    {line}")
+            except Exception:
+                pass
             if "choices" not in result or not result["choices"]:
                 raise RuntimeError("No choices in Cerebras response")
             
-            return result["choices"][0]["message"]["content"]
+            choice0 = result["choices"][0]
+            message = choice0.get("message") or {}
+            content = message.get("content")
+            if not content:
+                content = choice0.get("text")
+            if not content:
+                delta = choice0.get("delta") or {}
+                content = delta.get("content")
+            if not content:
+                raise KeyError("content")
+            return content
     
     def _parse_correctness(self, text: str) -> bool:
         """Parse correctness from validation response."""
@@ -1105,7 +1235,6 @@ class TreeOfThoughtSolver:
                 content_logger.info(f"Thought {i}:")
                 content_logger.info(f"  Text: {thought.text}")
                 content_logger.info(f"  Rationale: {thought.rationale}")
-                content_logger.info(f"  Confidence: {thought.confidence}")
                 content_logger.info(f"  Intent: {thought.intent}")
                 if thought.candidate:
                     content_logger.info(f"  Candidate Answer: {thought.candidate}")
@@ -1116,7 +1245,7 @@ class TreeOfThoughtSolver:
         
         # Brief summary for main logger
         for i, thought in enumerate(thoughts, 1):
-            logger.info(f"  {i}. {thought.text[:50]}... (confidence: {thought.confidence:.2f}, intent: {thought.intent})")
+            logger.info(f"  {i}. {thought.text[:50]}... (intent: {thought.intent})")
             if thought.candidate:
                 logger.info(f"     → Candidate answer: {thought.candidate}")
         
@@ -1153,8 +1282,17 @@ class TreeOfThoughtSolver:
             new_scratchpad = node.state.scratchpad + [thought]
             new_candidate = thought.candidate if thought.candidate else node.state.candidate_solution
             
+            # Compose child subproblem text as parent text plus full branch (ideas + insights)
+            branch_parts = []
+            for item in new_scratchpad:
+                text_part = f"- {item.text}" if item.text else "-"
+                rationale_part = f"  Insights: {item.rationale}" if item.rationale else ""
+                branch_parts.append(f"{text_part}\n{rationale_part}".rstrip())
+            branch_str = "\n".join(branch_parts)
+            child_subproblem_text = f"{node.state.subproblem_text}\n\nBranch:\n{branch_str}" if branch_str else node.state.subproblem_text
+
             child_state = NodeState(
-                subproblem_text=node.state.subproblem_text,
+                subproblem_text=child_subproblem_text,
                 scratchpad=new_scratchpad,
                 objective=node.state.objective,
                 candidate_solution=new_candidate,
@@ -1223,7 +1361,7 @@ async def main():
     logger.info("="*60)
     
     # Test with the water molecule problem
-    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
+    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass now'
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     

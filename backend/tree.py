@@ -209,13 +209,14 @@ class SolutionValidator(ABC):
 class SolverConfig:
     """Configuration for the Tree-of-Thoughts solver."""
     beam_width: int = 3
-    max_depth: int = 4
+    max_depth: int = 2
     selection_top_k: int = 2
     max_ideas_hint_per_node: Optional[int] = None
     temperature: float = 0.7
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
     reasoning_effort: str = "low"
+    max_tokens: int = 2000
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -231,6 +232,8 @@ class SolverConfig:
             raise ValueError(f"max_retries must be non-negative, got {self.max_retries}")
         if self.max_ideas_hint_per_node is not None and self.max_ideas_hint_per_node <= 0:
             raise ValueError(f"max_ideas_hint_per_node must be positive or None, got {self.max_ideas_hint_per_node}")
+        if self.max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {self.max_tokens}")
 
 
 # ============================================================================
@@ -340,16 +343,17 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         # Build context string
         context = build_context_string(state.scratchpad, state.candidate_solution)
         
-        # Format max ideas hint
-        # New prompt expects a number directly in the sentence (e.g., "the 3 most important insights")
+        # Hints for counts
         max_hint = str(max_ideas) if max_ideas else "3"
+        up_to_hint = str(max_ideas) if max_ideas else "5"
         
-        # Get template and format it
-        template = PROMPTS["thought_generation"]
+        # Prefer flexible idea-or-direct generation; fall back if missing
+        template = PROMPTS.get("idea_or_direct_generation")
         prompt = template.format(
             problem=state.subproblem_text,
             context=context,
-            max_hint=max_hint
+            max_hint=max_hint,
+            up_to_hint=up_to_hint
         )
         
         # Log the full prompt being sent
@@ -376,7 +380,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.config.temperature,
-            "max_tokens": 1000
+            "max_tokens": self.config.max_tokens
         }
         # Log request (without API key)
         try:
@@ -434,7 +438,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.config.temperature,
-            "max_tokens": 1000,
+            "max_tokens": self.config.max_tokens,
             "stream": True
         }
         try:
@@ -506,17 +510,25 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         
         thoughts = []
         
-        # Split into items. Support markdown-bold numbering (e.g., **1. ...**) and HR separators (---).
-        numbered_splitter = re.compile(r'^\s*(?:\*\*)?\d+\.\s*', re.MULTILINE)
-        items = numbered_splitter.split(text)
-        if len(items) > 1:
-            items = [s for s in items[1:] if s.strip()]
+        # Prefer splitting by explicit branch headers like: "1. Branch: ..."
+        branch_header_re = re.compile(r'^\s*(?:\*\*)?\d+\.\s*Branch\s*:\s*.*$', re.IGNORECASE | re.MULTILINE)
+        header_matches = list(branch_header_re.finditer(text))
+        segments: List[str] = []
+        if header_matches:
+            for idx, match in enumerate(header_matches):
+                start = match.start()
+                end = header_matches[idx + 1].start() if idx + 1 < len(header_matches) else len(text)
+                segment = text[start:end].strip()
+                if segment:
+                    segments.append(segment)
         else:
+            # Fallback: split on horizontal rule separators (---)
             hr_splitter = re.compile(r'^\s*-{3,}\s*$', re.MULTILINE)
-            items = [s for s in hr_splitter.split(text) if s.strip()] or [text]
+            parts = [s for s in hr_splitter.split(text) if s.strip()] or [text]
+            segments = [p.strip() for p in parts]
         
-        for item in items:
-            thought = self._parse_single_thought(item.strip())
+        for segment in segments:
+            thought = self._parse_single_thought(segment)
             if thought:
                 thoughts.append(thought)
         
@@ -533,8 +545,9 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             why_match = re.search(r'(?:Why\s*:\s*|\*?Why\s+this\s+matters\*?\s*[–-]\s*)(.+?)(?=\n\s*Answer|\n\s*\*?Insights\*?|\n\s*-{3,}|\n\s*$)', item, re.IGNORECASE | re.DOTALL)
             # Capture Insights bullet block after an Insights header
             insights_block_match = re.search(r'\n\s*\*?Insights\*?\s*:?\s*\n(?P<ins>(?:[ \t]*[\-•–].*(?:\n|$))+)', item, re.IGNORECASE)
-            tentative_answer_match = re.search(r'Answer\s*\(tentative\):\s*(.+?)(?=\n\s*\n|\n\s*\d+\.|$)', item, re.IGNORECASE | re.DOTALL)
-            answer_match = re.search(r'Answer:\s*(.+?)(?=\n\s*\n|\n\s*\d+\.|$)', item, re.IGNORECASE | re.DOTALL)
+            # Capture Answer blocks as multi-line up to a separator (---) or end of item
+            tentative_answer_match = re.search(r'Answer\s*\(tentative\)\s*:\s*(.+?)(?=\n\s*-{3,}\s*$|\Z)', item, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            answer_match = re.search(r'Answer\s*:\s*(.+?)(?=\n\s*-{3,}\s*$|\Z)', item, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
             # Legacy support: Idea/Insight/Risk
             legacy_idea_match = re.search(r'(?:Idea|Insight|Risk):\s*(.+?)(?=\n|Why:|$)', item, re.IGNORECASE | re.DOTALL)
@@ -774,8 +787,8 @@ class LLMIdeaValidator(IdeaValidator):
             "messages": [
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.3,  # Lower temperature for validation
-            "max_tokens": 200
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens
         }
         # Log request (without API key)
         try:
@@ -922,8 +935,8 @@ class LLMSolutionValidator(SolutionValidator):
             "messages": [
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.1,  # Very low temperature for validation
-            "max_tokens": 300
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens
         }
         # Log request (without API key)
         try:
@@ -1000,10 +1013,11 @@ class LLMSolutionValidator(SolutionValidator):
 @dataclass
 class SearchResult:
     """Result of a tree search."""
-    best_node: Optional[SubProblemNode]
     expanded_nodes: int
     solved: bool
     trace: List[str] = field(default_factory=list)
+    final_solution_text: Optional[str] = None
+    root_candidates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class TreeOfThoughtSolver:
@@ -1024,39 +1038,35 @@ class TreeOfThoughtSolver:
         # Public tree state attributes
         self.root_node: Optional[SubProblemNode] = None
         self.current_frontier: List[SubProblemNode] = []
-        self.best_node: Optional[SubProblemNode] = None
         self.expanded_nodes: int = 0
         self.current_depth: int = 0
         self.is_solving: bool = False
         self.solving_complete: bool = False
         self.trace: List[str] = []
+        self.final_solution_text: Optional[str] = None
+        self.root_candidates: List[Dict[str, Any]] = []
         
     def get_tree_state(self) -> Dict[str, Any]:
         """Get current tree state for external access."""
         return {
             "root_node": self.root_node.to_dict() if self.root_node else None,
             "current_frontier": [node.to_dict() for node in self.current_frontier],
-            "best_node": self.best_node.to_dict() if self.best_node else None,
             "expanded_nodes": self.expanded_nodes,
             "current_depth": self.current_depth,
             "is_solving": self.is_solving,
             "solving_complete": self.solving_complete,
             "trace": self.trace.copy(),
-            "frontier_size": len(self.current_frontier)
+            "frontier_size": len(self.current_frontier),
+            "final_solution_text": self.final_solution_text,
+            "root_candidates": self.root_candidates
         }
     
     def get_solution_path(self) -> List[Dict[str, Any]]:
         """Get the path from root to best solution."""
-        if not self.best_node:
+        if not self.root_node:
             return []
-        
-        path = []
-        current = self.best_node
-        
-        # Traverse up to root (we'd need parent pointers for this - simplified approach)
-        # For now, just return the chain of thought from the best node
-        path.append({
-            "node": current.to_dict(),
+        return [{
+            "node": self.root_node.to_dict(),
             "chain_of_thought": [
                 {
                     "text": t.text,
@@ -1064,24 +1074,21 @@ class TreeOfThoughtSolver:
                     "confidence": t.confidence,
                     "intent": t.intent,
                     "candidate": t.candidate
-                } for t in current.get_chain_of_thought()
+                } for t in self.root_node.get_chain_of_thought()
             ]
-        })
-        
-        return path
+        }]
     
     async def solve(self, problem_text: str, objective: str = "default") -> SearchResult:
-        """Solve the problem using Tree-of-Thoughts."""
+        """Solve the problem using per-node recursion with conditional branching."""
         self.is_solving = True
         self.solving_complete = False
         self.expanded_nodes = 0
         self.current_depth = 0
         self.trace = []
         
-        logger.info(f"🌳 Starting Tree-of-Thoughts search")
+        logger.info(f"🌳 Starting Tree-of-Thoughts (per-node recursion)")
         logger.info(f"📋 Problem: {problem_text}")
         logger.info(f"🎯 Objective: {objective}")
-        logger.info(f"⚙️ Config: beam_width={self.config.beam_width}, max_depth={self.config.max_depth}")
         
         # Initialize root node
         root_state = NodeState(
@@ -1096,109 +1103,208 @@ class TreeOfThoughtSolver:
         }
         logger.info(f"🌱 Created root node")
         
-        # Initialize search state
+        # Reset frontier-style public attrs for backward-compat public access
         self.current_frontier = [self.root_node]
-        self.best_node = None
+        self.final_solution_text = None
+        self.root_candidates = []
         
-        # Tree is now ready for solving
+        # Hard cap depth at 5 as requested
+        depth_cap = 5
         
-        # Beam search by depth
-        for depth in range(self.config.max_depth + 1):
-            self.current_depth = depth
-            
-            if not self.current_frontier:
-                logger.info(f"🚫 No nodes in frontier at depth {depth}, stopping search")
-                self.trace.append(f"Depth {depth}: No nodes in frontier, stopping")
-                break
-            
-            logger.info(f"🔍 Depth {depth}: Processing {len(self.current_frontier)} nodes")
-            self.trace.append(f"Depth {depth}: {len(self.current_frontier)} nodes in frontier")
-            next_frontier = []
-            
-            # Process nodes at this depth
-            
-            for i, node in enumerate(self.current_frontier):
-                logger.info(f"🔄 Processing node {i+1}/{len(self.current_frontier)} at depth {depth}")
-                node.processing_status = "processing"
-                
-                # Check if node is solved
-                
-                # Check if solved
-                if await self.solution_validator.is_solved(node.state):
-                    node.terminal_status = "solved"
-                    node.processing_status = "completed"
-                    self.best_node = node
-                    logger.info(f"✅ Solution found at depth {depth}!")
-                    logger.info(f"💡 Solution: {node.state.candidate_solution}")
-                    self.trace.append(f"Solution found at depth {depth}")
-                    
-                    # Solution found, return result
-                    
-                    self.is_solving = False
-                    self.solving_complete = True
-                    return SearchResult(
-                        best_node=self.best_node,
-                        expanded_nodes=self.expanded_nodes,
-                        solved=True,
-                        trace=self.trace
-                    )
-                
-                # Skip if at max depth
-                if depth >= self.config.max_depth:
-                    logger.info(f"⏹️ Reached max depth {self.config.max_depth}, not expanding")
-                    continue
-                
-                # Expand node
-                logger.info(f"🌿 Expanding node at depth {depth}")
-                children = await self._expand_node(node)
-                self.expanded_nodes += 1
-                logger.info(f"📈 Generated {len(children)} children")
-                
-                # Update value estimates for optimization
-                for child in children:
-                    quality = await self.solution_validator.quality(child.state)
-                    if quality is not None:
-                        if objective == "optimize:min":
-                            child.value_estimate = -quality  # Higher is better
-                        else:
-                            child.value_estimate = quality
-                
-                next_frontier.extend(children)
-            
-            # Select top nodes for next frontier (beam search)
-            if next_frontier:
-                logger.info(f"📊 Beam selection: {len(next_frontier)} candidates -> {min(self.config.beam_width, len(next_frontier))} selected")
-                
-                # Sort by value estimate (higher is better)
-                next_frontier.sort(
-                    key=lambda n: n.value_estimate if n.value_estimate is not None else 0.0,
-                    reverse=True
-                )
-                
-                # Log top candidates
-                for i, node in enumerate(next_frontier[:5]):  # Show top 5
-                    estimate = node.value_estimate or 0.0
-                    logger.info(f"  #{i+1}: score={estimate:.3f}, solution='{node.state.candidate_solution or 'None'}'")
-                
-                self.current_frontier = next_frontier[:self.config.beam_width]
-                
-                # Update best node
-                if self.current_frontier and (self.best_node is None or 
-                    (self.current_frontier[0].value_estimate or 0) > (self.best_node.value_estimate or 0)):
-                    old_best = self.best_node.state.candidate_solution if self.best_node else None
-                    self.best_node = self.current_frontier[0]
-                    new_best = self.best_node.state.candidate_solution
-                    logger.info(f"🏆 New best node: '{old_best}' -> '{new_best}' (score: {self.best_node.value_estimate:.3f})")
+        # Compute best solution text recursively from root context
+        result = await self._compute_best_recursive(self.root_node, depth_cap)
         
-        logger.info(f"🏁 Search completed after {self.expanded_nodes} expansions")
-        logger.info(f"🎯 Final result: solved={False}, best_solution='{self.best_node.state.candidate_solution if self.best_node else None}'")
+        # Package final answer at root level
+        chosen_idea_text: Optional[str] = None
+        if self.root_node.children:
+            # If best came from a specific child, we cannot directly know which one here without storing.
+            # Instead, set idea to None unless a direct child was chosen and recorded on root.
+            pass
+        
+        # For root, we package using the chosen first-level idea if available; otherwise just solution
+        final_solution_text = result.get("solution_text")
+        self.final_solution_text = final_solution_text
+        self.root_candidates = result.get("candidates") or []
+        if final_solution_text:
+            # If root has an incoming_thought (it should not), include; otherwise omit
+            if self.root_node.incoming_thought and self.root_node.incoming_thought.text:
+                package = self._package_idea_and_solution(self.root_node.incoming_thought.text, final_solution_text)
+            else:
+                # Root: no incoming idea; return solution only
+                package = self._package_idea_and_solution(None, final_solution_text)
+            self.root_node.state.candidate_solution = package
+            self.root_node.terminal_status = "solved" if result.get("solved") else None
+        else:
+            self.root_node.state.candidate_solution = None
+            self.root_node.terminal_status = None
+        
+        # Expose public attributes
+        self.current_frontier = []
+        self.current_depth = 0
+        
+        self.is_solving = False
+        self.solving_complete = True
         
         return SearchResult(
-            best_node=self.best_node,
             expanded_nodes=self.expanded_nodes,
-            solved=False,
-            trace=self.trace
+            solved=bool(result.get("solved")),
+            trace=self.trace,
+            final_solution_text=self.final_solution_text,
+            root_candidates=self.root_candidates
         )
+
+    def _package_idea_and_solution(self, idea_text: Optional[str], solution_text: str) -> str:
+        """Create the 'inputted idea + solution' package string."""
+        if idea_text is None or not str(idea_text).strip():
+            return f"Solution: {solution_text}"
+        return f"Idea: {idea_text}\nSolution: {solution_text}"
+
+    async def _evaluate_in_parent_context(self, parent_problem_text: str, solution_text: str) -> Dict[str, Any]:
+        """Evaluate a solution string in the given problem context using the solution validator."""
+        temp_state = NodeState(subproblem_text=parent_problem_text, candidate_solution=solution_text)
+        try:
+            solved = await self.solution_validator.is_solved(temp_state)
+        except Exception as e:
+            logger.warning(f"Solution validation error: {e}")
+            solved = False
+        quality: Optional[float] = None
+        try:
+            quality = await self.solution_validator.quality(temp_state)
+        except Exception as e:
+            logger.warning(f"Solution quality error: {e}")
+        return {"solved": solved, "quality": quality}
+
+    async def _compute_best_recursive(self, node: SubProblemNode, depth_cap: int) -> Dict[str, Any]:
+        """Compute the best solution text at this node, returning dict with keys: solution_text, solved, quality."""
+        indent = "  " * node.depth
+        logger.info(f"\n{indent}📍 Node at Depth {node.depth}")
+        logger.info(f"{indent}   Problem: {node.state.subproblem_text}")
+        node.processing_status = "processing"
+        
+        # Generate thoughts (ideas and/or direct answers)
+        thoughts = await self.thought_generator.generate(
+            node.state,
+            self.config.max_ideas_hint_per_node
+        )
+        node.generated_thoughts = thoughts.copy()
+        logger.info(f"{indent}💭 Generated {len(thoughts)} thoughts")
+        
+        # Score thoughts for possible tie-breaks
+        scored_thoughts: List[tuple] = []
+        for t in thoughts:
+            # If this thought proposes a direct answer, skip idea validation
+            if t.candidate:
+                node.thought_scores[t.text] = 0.0  # tie-breaker only; real validation via solution validator
+                scored_thoughts.append((t, 0.0))
+                logger.info(f"{indent}  Skipping idea validation for direct answer thought")
+                continue
+            try:
+                score = await self.idea_validator.evaluate(node.state, t)
+            except Exception as e:
+                logger.warning(f"{indent}Idea evaluation failed: {e}")
+                score = 0.0
+            node.thought_scores[t.text] = score
+            scored_thoughts.append((t, score))
+        
+        # Separate direct answer candidates and branch ideas
+        direct_candidates: List[Thought] = [t for t, _ in scored_thoughts if t.candidate]
+        branch_ideas_scored: List[tuple] = [(t, s) for t, s in scored_thoughts if t.intent == "idea"]
+        
+        # If at depth cap, do not branch further
+        if node.depth >= depth_cap:
+            branch_ideas_scored = []
+            logger.info(f"{indent}⏹️ Reached depth cap {depth_cap}; considering only direct solutions")
+        
+        # Recursively compute child solutions for each idea
+        child_results: List[Dict[str, Any]] = []
+        for idea, idea_score in branch_ideas_scored:
+            # Create child node for this idea
+            new_scratchpad = node.state.scratchpad + [idea]
+            child_state = NodeState(
+                subproblem_text=f"{node.state.subproblem_text}\n\nAssume/Idea: {idea.text}\nWhy: {idea.rationale}",
+                scratchpad=new_scratchpad,
+                objective=node.state.objective,
+                candidate_solution=None,
+                derived_facts=node.state.derived_facts.copy()
+            )
+            child_node = SubProblemNode(
+                state=child_state,
+                depth=node.depth + 1,
+                incoming_thought=idea
+            )
+            node.children.append(child_node)
+            self.expanded_nodes += 1
+            logger.info(f"{indent}🌿 Spawning child for idea: {idea.text[:60]}...")
+            child_best = await self._compute_best_recursive(child_node, depth_cap)
+            # Store association with parent idea score for tie-breaks if needed
+            child_results.append({
+                "idea": idea,
+                "idea_score": idea_score,
+                "solution_text": child_best.get("solution_text"),
+                "solved": child_best.get("solved", False),
+                "quality": child_best.get("quality")
+            })
+        
+        # Build candidate packages for evaluation in parent context (this node is the parent)
+        parent_problem = node.state.subproblem_text
+        candidates: List[Dict[str, Any]] = []
+        
+        # Direct solutions proposed at this node
+        for t in direct_candidates:
+            sol_text = t.candidate or ""
+            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text)
+            candidates.append({
+                "origin": "direct",
+                "idea_text": None,
+                "solution_text": sol_text,
+                "solved": eval_res["solved"],
+                "quality": eval_res.get("quality") or 0.0,
+                "tie_score": node.thought_scores.get(t.text, 0.0)
+            })
+        
+        # Child-derived solutions, repackaged under this node's idea when returning upward
+        for child_info in child_results:
+            sol_text = child_info.get("solution_text")
+            if not sol_text:
+                continue
+            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text)
+            candidates.append({
+                "origin": "child",
+                "idea_text": child_info["idea"].text,
+                "solution_text": sol_text,
+                "solved": eval_res["solved"],
+                "quality": eval_res.get("quality") or 0.0,
+                "tie_score": float(child_info.get("idea_score") or 0.0)
+            })
+        
+        # Pick best candidate: prefer solved, then higher quality, then tie_score
+        def rank_key(c: Dict[str, Any]):
+            return (1 if c["solved"] else 0, c.get("quality") or 0.0, c.get("tie_score") or 0.0)
+        best_candidate: Optional[Dict[str, Any]] = None
+        if candidates:
+            candidates.sort(key=rank_key, reverse=True)
+            best_candidate = candidates[0]
+            logger.info(f"{indent}🏆 Selected candidate (solved={best_candidate['solved']}, quality={best_candidate['quality']})")
+        else:
+            logger.info(f"{indent}❌ No candidates produced at this node")
+        
+        # Prepare return to parent: package with this node's incoming idea
+        if best_candidate:
+            selected_solution_text = best_candidate["solution_text"]
+            # Update node state with local packaging for visibility
+            incoming_idea_text = node.incoming_thought.text if node.incoming_thought else None
+            node.state.candidate_solution = self._package_idea_and_solution(incoming_idea_text, selected_solution_text)
+            node.terminal_status = "solved" if best_candidate["solved"] else None
+            return {
+                "solution_text": selected_solution_text,
+                "solved": best_candidate["solved"],
+                "quality": best_candidate.get("quality"),
+                "candidates": candidates
+            }
+        else:
+            node.state.candidate_solution = None
+            node.terminal_status = None
+            return {"solution_text": None, "solved": False, "quality": None, "candidates": candidates}
     
     async def _expand_node(self, node: SubProblemNode) -> List[SubProblemNode]:
         """Expand a node by generating and validating thoughts."""
@@ -1259,6 +1365,12 @@ class TreeOfThoughtSolver:
         logger.info(f"📊 Scoring {len(thoughts)} thoughts...")
         scored_thoughts = []
         for i, thought in enumerate(thoughts):
+            # If the thought proposes a direct answer, skip idea validation
+            if thought.candidate:
+                scored_thoughts.append((thought, 0.0))
+                node.thought_scores[thought.text] = 0.0
+                logger.info(f"  {i+1}. Direct answer provided; skipping idea validation")
+                continue
             try:
                 score = await self.idea_validator.evaluate(node.state, thought)
                 if not (0 <= score <= 1):
@@ -1271,10 +1383,11 @@ class TreeOfThoughtSolver:
                 logger.warning(f"Failed to validate thought: {e}")
                 continue
         
-        # Select top thoughts
-        scored_thoughts.sort(key=lambda x: x[1], reverse=True)
-        top_thoughts = scored_thoughts[:self.config.selection_top_k]
-        logger.info(f"✅ Selected top {len(top_thoughts)} thoughts (from {len(scored_thoughts)} valid)")
+        # Select top thoughts (ideas only) for branching
+        idea_only = [(t, s) for (t, s) in scored_thoughts if not t.candidate]
+        idea_only.sort(key=lambda x: x[1], reverse=True)
+        top_thoughts = idea_only[:self.config.selection_top_k]
+        logger.info(f"✅ Selected top {len(top_thoughts)} ideas for branching (from {len(idea_only)} idea thoughts)")
         
         # Create children
         children = []
@@ -1320,7 +1433,31 @@ class TreeOfThoughtSolver:
 def create_default_solver(config: Optional[SolverConfig] = None, use_llm_validators: bool = False) -> TreeOfThoughtSolver:
     """Create a solver with default implementations."""
     if config is None:
-        config = SolverConfig()
+        # Try to load from JSON config if available
+        config_path = os.getenv("TOT_CONFIG_PATH") or os.path.join(os.path.dirname(__file__), "config.json")
+        loaded: Optional[Dict[str, Any]] = None
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    loaded = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load config from {config_path}: {e}")
+            loaded = None
+
+        if loaded and isinstance(loaded, dict):
+            # Only pass recognized fields; ignore unknowns to be fail-fast-safe
+            allowed_keys = {
+                "beam_width", "max_depth", "selection_top_k", "max_ideas_hint_per_node",
+                "temperature", "max_retries", "cerebras_model", "reasoning_effort", "max_tokens"
+            }
+            filtered = {k: v for k, v in loaded.items() if k in allowed_keys}
+            try:
+                config = SolverConfig(**filtered)
+            except Exception as e:
+                logger.warning(f"Invalid values in config file, falling back to defaults: {e}. Loaded keys: {list(filtered.keys())}")
+                config = SolverConfig()
+        else:
+            config = SolverConfig()
     
     thought_generator = ProposeThoughtGenerator(config)
     
@@ -1362,7 +1499,7 @@ async def main():
     logger.info("="*60)
     
     # Test with the water molecule problem
-    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass now'
+    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     
@@ -1376,8 +1513,8 @@ async def main():
     logger.info(f"🎯 FINAL RESULTS:")
     logger.info(f"   Solved: {result.solved}")
     logger.info(f"   Expanded nodes: {result.expanded_nodes}")
-    if result.best_node and result.best_node.state.candidate_solution:
-        logger.info(f"   Best solution: {result.best_node.state.candidate_solution}")
+    if result.final_solution_text:
+        logger.info(f"   Final solution: {result.final_solution_text}")
     logger.info("="*60)
     
     # Example of accessing tree state during/after solving

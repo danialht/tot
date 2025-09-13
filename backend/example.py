@@ -32,7 +32,6 @@ async def demonstrate_public_access():
     print("Before solving:")
     print(f"   solver.root_node: {solver.root_node}")
     print(f"   solver.current_frontier: {solver.current_frontier}")
-    print(f"   solver.best_node: {solver.best_node}")
     print(f"   solver.expanded_nodes: {solver.expanded_nodes}")
     print(f"   solver.current_depth: {solver.current_depth}")
     print(f"   solver.is_solving: {solver.is_solving}")
@@ -47,12 +46,12 @@ async def demonstrate_public_access():
         print("After solving:")
         print(f"   solver.root_node: {solver.root_node is not None}")
         print(f"   solver.current_frontier: {len(solver.current_frontier)} nodes")
-        print(f"   solver.best_node: {solver.best_node is not None}")
         print(f"   solver.expanded_nodes: {solver.expanded_nodes}")
         print(f"   solver.current_depth: {solver.current_depth}")
         print(f"   solver.is_solving: {solver.is_solving}")
         print(f"   solver.solving_complete: {solver.solving_complete}")
         print(f"   solver.trace: {len(solver.trace)} entries")
+        print(f"   final_solution_text: {solver.final_solution_text}")
         
     except Exception as e:
         print(f"⚠️  Solving failed (expected without API key): {str(e)[:100]}...")

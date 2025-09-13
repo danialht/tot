@@ -154,7 +154,8 @@ class SubProblemNode:
             "incoming_thought_text": self.incoming_thought.text if self.incoming_thought else None,
             "children_count": len(self.children),
             "processing_status": self.processing_status,
-            "terminal_status": self.terminal_status
+            "terminal_status": self.terminal_status,
+            "children": [child.to_dict() for child in self.children]
         }
 
 

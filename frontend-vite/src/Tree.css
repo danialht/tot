@@ -1,0 +1,57 @@
+.tree-node-box {
+  display: inline-block;
+  padding: 10px 18px;
+  background: #111;
+  border: 2px solid green;
+  border-radius: 8px;
+  color: green;
+  font-weight: bold;
+  margin: 0 auto;
+  position: relative;
+  z-index: 1;
+}
+
+.tree-children {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  margin-top: 24px;
+  position: relative;
+}
+
+.tree-child-circle {
+  width: 32px;
+  height: 32px;
+  background: #222;
+  border: 2px solid green;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: green;
+  font-weight: bold;
+  margin: 0 12px;
+  position: relative;
+  z-index: 2;
+}
+
+.tree-connector {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 2px;
+  height: 24px;
+  background: green;
+  transform: translateX(-50%);
+  z-index: 0;
+}
+
+.tree-connector-horizontal {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: green;
+  z-index: 0;
+}

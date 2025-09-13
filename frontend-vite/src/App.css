@@ -1,0 +1,143 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: #888;
+}
+
+.container {
+  min-height: 100vh;
+  min-width: 100vw;
+  width: 100vw;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: Inter, Arial, sans-serif;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 0;
+}
+
+.chatbox {
+  background: #222;
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  padding: 32px;
+  width: 70vw;
+  max-width: 1020px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  z-index: 1;
+}
+
+.messages {
+    min-height: 180px;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #333;
+    padding: 12px;
+    margin-bottom: 8px;
+    width: 100%;
+}
+
+.message {
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  max-width: 80%;
+  word-break: break-word;
+  color: #eee;
+  text-align: left;
+  align-self: flex-start;
+}
+
+.message.user {
+  background: #444;
+  align-self: flex-end;
+}
+
+.message.bot {
+  background: #555;
+  align-self: flex-start;
+}
+
+.inputRow {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.input {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #444;
+  font-size: 1.25rem;
+  outline: none;
+  background: #222;
+  color: #eee;
+}
+
+.button {
+  background: #666;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0 18px;
+  font-weight: 600;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.noMessages {
+  color: #888;
+  text-align: center;
+}

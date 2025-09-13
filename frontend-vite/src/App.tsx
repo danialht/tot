@@ -4,22 +4,46 @@ import Tree from './Tree';
 import type { TreeNode } from './Tree';
 
 
-const sampleTree: TreeNode = {
+
+// Helper function to deep clone a tree
+function cloneTree<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+const initialTree: TreeNode = {
   id: 'root',
   label: 'Root',
+  description: 'This is the root node.',
   children: [
-    { id: '1', label: 'Child 1' },
-    { id: '2', label: 'Child 2', children: [
-      { id: '2-1', label: 'Grandchild 2-1' },
-      { id: '2-2', label: 'Grandchild 2-2' },
+    { id: '1', label: 'Child 1', description: 'First child.' },
+    { id: '2', label: 'Child 2', description: 'Second child.', children: [
+      { id: '2-1', label: 'Subchild 2-1', description: 'First subchild.' },
     ] },
-    { id: '3', label: 'Child 3' },
   ],
 };
+
+// Function to add a child to a node by id
+function addChildToTree(tree: TreeNode, parentId: string, child: TreeNode): TreeNode {
+  if (tree.id === parentId) {
+    return {
+      ...tree,
+      children: [...(tree.children || []), child],
+    };
+  }
+  if (tree.children) {
+    return {
+      ...tree,
+      children: tree.children.map(c => addChildToTree(c, parentId, child)),
+    };
+  }
+  return tree;
+}
+
 
 function App() {
   const [messages, setMessages] = useState<string[]>([]);
   const [input, setInput] = useState('');
+  const [tree, setTree] = useState<TreeNode>(initialTree);
   const ws = useRef<WebSocket | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -48,6 +72,11 @@ function App() {
       setMessages((msgs) => [...msgs, "You: " + input]);
       setInput('');
     }
+  };
+
+  // Function to change the tree state to a new tree
+  const setTreeTo = (newTree: TreeNode) => {
+    setTree(cloneTree(newTree));
   };
 
   return (
@@ -88,8 +117,7 @@ function App() {
           </button>
         </div>
       </div>
-
-      <Tree data={sampleTree} />
+  <Tree data={tree} />
     </div>
       </>
   );

@@ -14,8 +14,11 @@ interface DrawnNode {
 function getTreeLayout(root: TreeNode): DrawnNode[] {
   const nodes: DrawnNode[] = [];
   let x = 0;
+  const CHAR_WIDTH = 18; // px per character
   function traverse(node: TreeNode, depth: number): number {
-    let startX = x;
+    const labelLength = node.label.length;
+    const nodeWidth = Math.max(48, labelLength * CHAR_WIDTH);
+    const startX = x;
     let childCount = 0;
     if (node.children && node.children.length > 0) {
       for (const child of node.children) {
@@ -26,10 +29,10 @@ function getTreeLayout(root: TreeNode): DrawnNode[] {
       const firstChild = nodes[nodes.length - childCount];
       const lastChild = nodes[nodes.length - 1];
       const centerX = (firstChild.x + lastChild.x) / 2;
-      nodes.push({ node, x: centerX, y: depth * VERTICAL_GAP, width: NODE_WIDTH, height: NODE_HEIGHT });
+      nodes.push({ node, x: centerX, y: depth * VERTICAL_GAP, width: nodeWidth, height: NODE_HEIGHT });
     } else {
-      nodes.push({ node, x, y: depth * VERTICAL_GAP, width: NODE_WIDTH, height: NODE_HEIGHT });
-      x += NODE_WIDTH + HORIZONTAL_GAP;
+      nodes.push({ node, x, y: depth * VERTICAL_GAP, width: nodeWidth, height: NODE_HEIGHT });
+      x += nodeWidth + HORIZONTAL_GAP;
     }
     return startX;
   }
@@ -41,6 +44,7 @@ function getTreeLayout(root: TreeNode): DrawnNode[] {
 export interface TreeNode {
   id: string;
   label: string;
+  description?: string;
   children?: TreeNode[];
 }
 
@@ -48,7 +52,6 @@ interface TreeProps {
   data: TreeNode;
 }
 
-const NODE_WIDTH = 100;
 const NODE_HEIGHT = 40;
 const HORIZONTAL_GAP = 40;
 const VERTICAL_GAP = 80;
@@ -73,8 +76,8 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
           const childNode = nodes.find(n => n.node.id === child.id);
           if (childNode) {
             ctx.beginPath();
-            ctx.moveTo(node.x + NODE_WIDTH / 2, node.y + NODE_HEIGHT);
-            ctx.lineTo(childNode.x + NODE_WIDTH / 2, childNode.y);
+            ctx.moveTo(node.x + node.width / 2, node.y + NODE_HEIGHT);
+            ctx.lineTo(childNode.x + childNode.width / 2, childNode.y);
             ctx.strokeStyle = 'green';
             ctx.lineWidth = 2;
             ctx.stroke();
@@ -86,7 +89,7 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
     // Draw nodes
     for (const node of nodes) {
       ctx.beginPath();
-      ctx.rect(node.x, node.y, NODE_WIDTH, NODE_HEIGHT);
+      ctx.rect(node.x, node.y, node.width, NODE_HEIGHT);
       ctx.fillStyle = hoveredNode && hoveredNode.node.id === node.node.id ? '#003300' : '#111';
       ctx.strokeStyle = 'green';
       ctx.lineWidth = 2;
@@ -96,7 +99,7 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
       ctx.font = 'bold 16px Arial';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(node.node.label, node.x + NODE_WIDTH / 2, node.y + NODE_HEIGHT / 2);
+      ctx.fillText(node.node.label, node.x + node.width / 2, node.y + NODE_HEIGHT / 2);
     }
   }, [data, hoveredNode]);
 
@@ -106,6 +109,9 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
     if (!canvas) return;
     const nodes = getTreeLayout(data);
     function handleMove(e: MouseEvent) {
+      if (!canvas){
+        throw new Error("Canvas element is not available");
+      }
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -114,9 +120,9 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
       for (const node of nodes) {
         if (
           mx >= node.x &&
-          mx <= node.x + NODE_WIDTH &&
+          mx <= node.x + node.width &&
           my >= node.y &&
-          my <= node.y + NODE_HEIGHT
+          my <= node.y + node.height
         ) {
           found = node;
           break;
@@ -138,7 +144,7 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
 
   // Calculate canvas size
   const nodes = getTreeLayout(data);
-  const width = nodes.length > 0 ? Math.max(...nodes.map(n => n.x + NODE_WIDTH)) + 20 : 400;
+  const width = nodes.length > 0 ? Math.max(...nodes.map(n => n.x + n.width)) + 20 : 400;
   const height = nodes.length > 0 ? Math.max(...nodes.map(n => n.y + NODE_HEIGHT)) + 20 : 300;
 
   return (
@@ -148,7 +154,7 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
         <div
           style={{
             position: 'absolute',
-            left: hoveredNode.x + NODE_WIDTH + 10,
+            left: hoveredNode.x + hoveredNode.width + 10,
             top: hoveredNode.y,
             background: '#222',
             color: 'green',

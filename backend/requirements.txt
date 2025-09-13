@@ -2,3 +2,6 @@
 fastapi
 uvicorn
 websockets
+aiohttp
+python-dotenv
+requests

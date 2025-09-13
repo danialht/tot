@@ -7,11 +7,13 @@ import os
 import re
 import json
 import logging
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Callable, AsyncIterator
 from enum import Enum
 
+import aiohttp
 import requests
 
 # Try to load environment variables from .env file
@@ -106,13 +108,70 @@ class SubProblemNode:
     children: List['SubProblemNode'] = field(default_factory=list)
     value_estimate: Optional[float] = None
     terminal_status: Optional[str] = None  # "solved" | "dead_end"
-
+    
+    # Exposed attributes for external access
+    input_context: Dict[str, Any] = field(default_factory=dict)  # What was passed into this node
+    generated_thoughts: List[Thought] = field(default_factory=list)  # Ideas generated at this node
+    thought_scores: Dict[str, float] = field(default_factory=dict)  # Scores for each thought
+    processing_status: str = "pending"  # "pending" | "processing" | "completed" | "failed"
+    
     def __post_init__(self):
         """Validate node on creation."""
         if self.depth < 0:
             raise ValueError(f"Depth must be non-negative, got {self.depth}")
         if self.terminal_status is not None and self.terminal_status not in ["solved", "dead_end"]:
             raise ValueError(f"Invalid terminal status: {self.terminal_status}")
+    
+    def get_chain_of_thought(self) -> List[Thought]:
+        """Get the current chain of thought (scratchpad) for this node."""
+        return self.state.scratchpad.copy()
+    
+    def get_children_with_thoughts(self) -> List[Dict[str, Any]]:
+        """Get children along with the thoughts that led to them."""
+        return [
+            {
+                "child": child,
+                "incoming_thought": child.incoming_thought,
+                "thought_score": child.thought_scores.get(child.incoming_thought.text if child.incoming_thought else "", 0.0)
+            }
+            for child in self.children
+        ]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize node to dictionary for external access."""
+        return {
+            "id": f"node_{id(self)}",
+            "depth": self.depth,
+            "subproblem": self.state.subproblem_text,
+            "chain_of_thought": [{
+                "text": t.text,
+                "rationale": t.rationale,
+                "confidence": t.confidence,
+                "intent": t.intent,
+                "candidate": t.candidate
+            } for t in self.state.scratchpad],
+            "generated_thoughts": [{
+                "text": t.text,
+                "rationale": t.rationale,
+                "confidence": t.confidence,
+                "intent": t.intent,
+                "candidate": t.candidate,
+                "score": self.thought_scores.get(t.text, 0.0)
+            } for t in self.generated_thoughts],
+            "candidate_solution": self.state.candidate_solution,
+            "value_estimate": self.value_estimate,
+            "terminal_status": self.terminal_status,
+            "processing_status": self.processing_status,
+            "input_context": self.input_context,
+            "children_count": len(self.children),
+            "incoming_thought": {
+                "text": self.incoming_thought.text,
+                "rationale": self.incoming_thought.rationale,
+                "confidence": self.incoming_thought.confidence,
+                "intent": self.incoming_thought.intent,
+                "candidate": self.incoming_thought.candidate
+            } if self.incoming_thought else None
+        }
 
 
 # ============================================================================
@@ -123,16 +182,22 @@ class ThoughtGenerator(ABC):
     """Abstract base class for generating thoughts."""
     
     @abstractmethod
-    def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
+    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
         """Generate thoughts for the given node state."""
         pass
+    
+    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> AsyncIterator[Thought]:
+        """Generate thoughts with streaming support. Default implementation calls generate()."""
+        thoughts = await self.generate(state, max_ideas_hint)
+        for thought in thoughts:
+            yield thought
 
 
 class IdeaValidator(ABC):
     """Abstract base class for validating thoughts."""
     
     @abstractmethod
-    def evaluate(self, state: NodeState, thought: Thought) -> float:
+    async def evaluate(self, state: NodeState, thought: Thought) -> float:
         """Evaluate a thought, returning a score in [0, 1]."""
         pass
 
@@ -141,12 +206,12 @@ class SolutionValidator(ABC):
     """Abstract base class for validating solutions."""
     
     @abstractmethod
-    def is_solved(self, state: NodeState) -> bool:
+    async def is_solved(self, state: NodeState) -> bool:
         """Check if the node state represents a solved problem."""
         pass
     
     @abstractmethod
-    def quality(self, state: NodeState) -> Optional[float]:
+    async def quality(self, state: NodeState) -> Optional[float]:
         """Return quality score (higher is better) for optimization tasks."""
         pass
 
@@ -211,7 +276,7 @@ def deduplicate_thoughts(thoughts: List[Thought]) -> List[Thought]:
 # ============================================================================
 
 class ProposeThoughtGenerator(ThoughtGenerator):
-    """Cerebras-backed thought generator."""
+    """Cerebras-backed thought generator with async and streaming support."""
     
     def __init__(self, config: SolverConfig):
         self.config = config
@@ -220,8 +285,20 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             raise ValueError("CEREBRAS_API_KEY environment variable is required")
         
         self.base_url = "https://api.cerebras.ai/v1"
+        self._session: Optional[aiohttp.ClientSession] = None
     
-    def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+    
+    async def close(self):
+        """Close the HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+    
+    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
         """Generate thoughts using Cerebras API."""
         max_ideas = max_ideas_hint or self.config.max_ideas_hint_per_node
         
@@ -235,7 +312,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         for attempt in range(self.config.max_retries + 1):
             try:
                 logger.info(f"🔄 API attempt {attempt + 1}/{self.config.max_retries + 1}")
-                response_text = self._call_cerebras(prompt)
+                response_text = await self._call_cerebras_async(prompt)
                 logger.info(f"📥 Received response ({len(response_text)} chars)")
                 logger.debug(f"📥 Raw response: {response_text[:200]}...")
                 
@@ -260,6 +337,18 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                 logger.warning(f"Attempt {attempt + 1} failed: {e}, retrying...")
         
         return []
+    
+    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> AsyncIterator[Thought]:
+        """Generate thoughts with streaming support."""
+        max_ideas = max_ideas_hint or self.config.max_ideas_hint_per_node
+        
+        logger.info(f"🤖 Starting streaming thought generation")
+        logger.info(f"📝 Subproblem: {state.subproblem_text}")
+        
+        prompt = self._build_prompt(state, max_ideas)
+        
+        async for thought in self._call_cerebras_streaming(prompt):
+            yield thought
     
     def _build_prompt(self, state: NodeState, max_ideas: Optional[int]) -> str:
         """Build the prompt for thought generation using configured templates."""
@@ -286,8 +375,10 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         
         return prompt
     
-    def _call_cerebras(self, prompt: str) -> str:
-        """Make API call to Cerebras."""
+    async def _call_cerebras_async(self, prompt: str) -> str:
+        """Make async API call to Cerebras."""
+        session = await self._get_session()
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -302,30 +393,93 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             "max_tokens": 1000
         }
         
-        response = requests.post(
+        async with session.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
-        )
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
+            
+            result = await response.json()
+            if "choices" not in result or not result["choices"]:
+                raise RuntimeError("No choices in Cerebras response")
+            
+            response_content = result["choices"][0]["message"]["content"]
+            
+            # Log the full response
+            logger.info(f"    📥 THOUGHTS:")
+            logger.info(f"    {'-'*50}")
+            for line in response_content.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+            
+            return response_content
+    
+    async def _call_cerebras_streaming(self, prompt: str) -> AsyncIterator[Thought]:
+        """Make streaming API call to Cerebras."""
+        session = await self._get_session()
         
-        if response.status_code != 200:
-            raise RuntimeError(f"Cerebras API error: {response.status_code} - {response.text}")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
         
-        result = response.json()
-        if "choices" not in result or not result["choices"]:
-            raise RuntimeError("No choices in Cerebras response")
+        data = {
+            "model": self.config.cerebras_model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": self.config.temperature,
+            "max_tokens": 1000,
+            "stream": True
+        }
         
-        response_content = result["choices"][0]["message"]["content"]
-        
-        # Log the full response
-        logger.info(f"    📥 THOUGHTS:")
-        logger.info(f"    {'-'*50}")
-        for line in response_content.split('\n'):
-            logger.info(f"    {line}")
-        logger.info(f"    {'-'*50}")
-        
-        return response_content
+        async with session.post(
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
+            
+            collected_content = ""
+            async for line in response.content:
+                line_str = line.decode('utf-8').strip()
+                if not line_str or line_str == "data: [DONE]":
+                    continue
+                
+                if line_str.startswith("data: "):
+                    try:
+                        json_str = line_str[6:]  # Remove "data: " prefix
+                        chunk = json.loads(json_str)
+                        
+                        if "choices" in chunk and chunk["choices"]:
+                            delta = chunk["choices"][0].get("delta", {})
+                            if "content" in delta:
+                                content = delta["content"]
+                                collected_content += content
+                                
+                                # Try to parse thoughts from accumulated content
+                                # This is a simple approach - in practice you might want more sophisticated parsing
+                                if collected_content.count('\n\n') > 0 or "Confidence:" in collected_content:
+                                    thoughts = self._parse_thoughts(collected_content)
+                                    for thought in thoughts:
+                                        yield thought
+                                    collected_content = ""  # Reset for next thought
+                                    
+                    except json.JSONDecodeError:
+                        continue
+            
+            # Parse any remaining content
+            if collected_content.strip():
+                thoughts = self._parse_thoughts(collected_content)
+                for thought in thoughts:
+                    yield thought
     
     def _parse_thoughts(self, text: str) -> List[Thought]:
         """Parse thoughts from Cerebras response."""
@@ -399,7 +553,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
 class RuleBasedIdeaValidator(IdeaValidator):
     """Rule-based validator for thoughts."""
     
-    def evaluate(self, state: NodeState, thought: Thought) -> float:
+    async def evaluate(self, state: NodeState, thought: Thought) -> float:
         """Evaluate thought using heuristic scoring."""
         score = thought.confidence
         
@@ -437,11 +591,11 @@ class RuleBasedIdeaValidator(IdeaValidator):
 class DefaultSolutionValidator(SolutionValidator):
     """Default validator for solution checking."""
     
-    def is_solved(self, state: NodeState) -> bool:
+    async def is_solved(self, state: NodeState) -> bool:
         """Check if state has a candidate solution."""
         return state.candidate_solution is not None and state.candidate_solution.strip() != ""
     
-    def quality(self, state: NodeState) -> Optional[float]:
+    async def quality(self, state: NodeState) -> Optional[float]:
         """Attempt numeric cast for optimization tasks."""
         if not state.candidate_solution:
             return None
@@ -467,8 +621,20 @@ class LLMIdeaValidator(IdeaValidator):
             raise ValueError("CEREBRAS_API_KEY environment variable is required")
         
         self.base_url = "https://api.cerebras.ai/v1"
+        self._session: Optional[aiohttp.ClientSession] = None
     
-    def evaluate(self, state: NodeState, thought: Thought) -> float:
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+    
+    async def close(self):
+        """Close the HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+    
+    async def evaluate(self, state: NodeState, thought: Thought) -> float:
         """Evaluate thought using LLM scoring."""
         try:
             # Build validation prompt
@@ -490,7 +656,7 @@ class LLMIdeaValidator(IdeaValidator):
             logger.info(f"    {'-'*50}")
             
             # Call Cerebras
-            response_text = self._call_cerebras(prompt)
+            response_text = await self._call_cerebras_async(prompt)
             
             # Log the validation response
             logger.info(f"    📥 VALIDATION:")
@@ -508,8 +674,10 @@ class LLMIdeaValidator(IdeaValidator):
             logger.warning(f"LLM validation failed: {e}, falling back to confidence score")
             return thought.confidence
     
-    def _call_cerebras(self, prompt: str) -> str:
-        """Make API call to Cerebras for validation."""
+    async def _call_cerebras_async(self, prompt: str) -> str:
+        """Make async API call to Cerebras for validation."""
+        session = await self._get_session()
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -524,21 +692,21 @@ class LLMIdeaValidator(IdeaValidator):
             "max_tokens": 200
         }
         
-        response = requests.post(
+        async with session.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            raise RuntimeError(f"Cerebras API error: {response.status_code} - {response.text}")
-        
-        result = response.json()
-        if "choices" not in result or not result["choices"]:
-            raise RuntimeError("No choices in Cerebras response")
-        
-        return result["choices"][0]["message"]["content"]
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
+            
+            result = await response.json()
+            if "choices" not in result or not result["choices"]:
+                raise RuntimeError("No choices in Cerebras response")
+            
+            return result["choices"][0]["message"]["content"]
     
     def _parse_validation_score(self, text: str) -> float:
         """Parse validation score from response."""
@@ -570,8 +738,20 @@ class LLMSolutionValidator(SolutionValidator):
             raise ValueError("CEREBRAS_API_KEY environment variable is required")
         
         self.base_url = "https://api.cerebras.ai/v1"
+        self._session: Optional[aiohttp.ClientSession] = None
     
-    def is_solved(self, state: NodeState) -> bool:
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+    
+    async def close(self):
+        """Close the HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+    
+    async def is_solved(self, state: NodeState) -> bool:
         """Check if solution is correct using LLM validation."""
         if not state.candidate_solution:
             return False
@@ -589,7 +769,7 @@ class LLMSolutionValidator(SolutionValidator):
                 logger.info(f"    {line}")
             logger.info(f"    {'-'*50}")
             
-            response_text = self._call_cerebras(prompt)
+            response_text = await self._call_cerebras_async(prompt)
             
             # Log the solution validation response
             logger.info(f"    📥 SOLUTION CHECK:")
@@ -607,7 +787,7 @@ class LLMSolutionValidator(SolutionValidator):
             logger.warning(f"LLM solution validation failed: {e}, falling back to simple check")
             return state.candidate_solution is not None and state.candidate_solution.strip() != ""
     
-    def quality(self, state: NodeState) -> Optional[float]:
+    async def quality(self, state: NodeState) -> Optional[float]:
         """Return quality score from LLM confidence."""
         if not state.candidate_solution:
             return None
@@ -622,8 +802,10 @@ class LLMSolutionValidator(SolutionValidator):
         
         return None
     
-    def _call_cerebras(self, prompt: str) -> str:
-        """Make API call to Cerebras for solution validation."""
+    async def _call_cerebras_async(self, prompt: str) -> str:
+        """Make async API call to Cerebras for solution validation."""
+        session = await self._get_session()
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -638,21 +820,21 @@ class LLMSolutionValidator(SolutionValidator):
             "max_tokens": 300
         }
         
-        response = requests.post(
+        async with session.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            raise RuntimeError(f"Cerebras API error: {response.status_code} - {response.text}")
-        
-        result = response.json()
-        if "choices" not in result or not result["choices"]:
-            raise RuntimeError("No choices in Cerebras response")
-        
-        return result["choices"][0]["message"]["content"]
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
+            
+            result = await response.json()
+            if "choices" not in result or not result["choices"]:
+                raise RuntimeError("No choices in Cerebras response")
+            
+            return result["choices"][0]["message"]["content"]
     
     def _parse_correctness(self, text: str) -> bool:
         """Parse correctness from validation response."""
@@ -694,7 +876,7 @@ class SearchResult:
 
 
 class TreeOfThoughtSolver:
-    """Main Tree-of-Thoughts solver using beam search."""
+    """Main Tree-of-Thoughts solver using beam search with async support and public tree access."""
     
     def __init__(
         self,
@@ -707,9 +889,64 @@ class TreeOfThoughtSolver:
         self.thought_generator = thought_generator
         self.idea_validator = idea_validator
         self.solution_validator = solution_validator
+        
+        # Public tree state attributes
+        self.root_node: Optional[SubProblemNode] = None
+        self.current_frontier: List[SubProblemNode] = []
+        self.best_node: Optional[SubProblemNode] = None
+        self.expanded_nodes: int = 0
+        self.current_depth: int = 0
+        self.is_solving: bool = False
+        self.solving_complete: bool = False
+        self.trace: List[str] = []
+        
+    def get_tree_state(self) -> Dict[str, Any]:
+        """Get current tree state for external access."""
+        return {
+            "root_node": self.root_node.to_dict() if self.root_node else None,
+            "current_frontier": [node.to_dict() for node in self.current_frontier],
+            "best_node": self.best_node.to_dict() if self.best_node else None,
+            "expanded_nodes": self.expanded_nodes,
+            "current_depth": self.current_depth,
+            "is_solving": self.is_solving,
+            "solving_complete": self.solving_complete,
+            "trace": self.trace.copy(),
+            "frontier_size": len(self.current_frontier)
+        }
     
-    def solve(self, problem_text: str, objective: str = "default") -> SearchResult:
+    def get_solution_path(self) -> List[Dict[str, Any]]:
+        """Get the path from root to best solution."""
+        if not self.best_node:
+            return []
+        
+        path = []
+        current = self.best_node
+        
+        # Traverse up to root (we'd need parent pointers for this - simplified approach)
+        # For now, just return the chain of thought from the best node
+        path.append({
+            "node": current.to_dict(),
+            "chain_of_thought": [
+                {
+                    "text": t.text,
+                    "rationale": t.rationale,
+                    "confidence": t.confidence,
+                    "intent": t.intent,
+                    "candidate": t.candidate
+                } for t in current.get_chain_of_thought()
+            ]
+        })
+        
+        return path
+    
+    async def solve(self, problem_text: str, objective: str = "default") -> SearchResult:
         """Solve the problem using Tree-of-Thoughts."""
+        self.is_solving = True
+        self.solving_complete = False
+        self.expanded_nodes = 0
+        self.current_depth = 0
+        self.trace = []
+        
         logger.info(f"🌳 Starting Tree-of-Thoughts search")
         logger.info(f"📋 Problem: {problem_text}")
         logger.info(f"🎯 Objective: {objective}")
@@ -720,40 +957,59 @@ class TreeOfThoughtSolver:
             subproblem_text=problem_text,
             objective=objective
         )
-        root_node = SubProblemNode(state=root_state, depth=0)
+        self.root_node = SubProblemNode(state=root_state, depth=0)
+        self.root_node.input_context = {
+            "original_problem": problem_text,
+            "objective": objective,
+            "config": self.config.__dict__
+        }
         logger.info(f"🌱 Created root node")
         
         # Initialize search state
-        current_frontier = [root_node]
-        best_node = None
-        expanded_nodes = 0
-        trace = []
+        self.current_frontier = [self.root_node]
+        self.best_node = None
+        
+        # Tree is now ready for solving
         
         # Beam search by depth
         for depth in range(self.config.max_depth + 1):
-            if not current_frontier:
+            self.current_depth = depth
+            
+            if not self.current_frontier:
                 logger.info(f"🚫 No nodes in frontier at depth {depth}, stopping search")
+                self.trace.append(f"Depth {depth}: No nodes in frontier, stopping")
                 break
             
-            logger.info(f"🔍 Depth {depth}: Processing {len(current_frontier)} nodes")
-            trace.append(f"Depth {depth}: {len(current_frontier)} nodes in frontier")
+            logger.info(f"🔍 Depth {depth}: Processing {len(self.current_frontier)} nodes")
+            self.trace.append(f"Depth {depth}: {len(self.current_frontier)} nodes in frontier")
             next_frontier = []
             
-            for i, node in enumerate(current_frontier):
-                logger.info(f"🔄 Processing node {i+1}/{len(current_frontier)} at depth {depth}")
+            # Process nodes at this depth
+            
+            for i, node in enumerate(self.current_frontier):
+                logger.info(f"🔄 Processing node {i+1}/{len(self.current_frontier)} at depth {depth}")
+                node.processing_status = "processing"
+                
+                # Check if node is solved
                 
                 # Check if solved
-                if self.solution_validator.is_solved(node.state):
+                if await self.solution_validator.is_solved(node.state):
                     node.terminal_status = "solved"
-                    best_node = node
+                    node.processing_status = "completed"
+                    self.best_node = node
                     logger.info(f"✅ Solution found at depth {depth}!")
                     logger.info(f"💡 Solution: {node.state.candidate_solution}")
-                    trace.append(f"Solution found at depth {depth}")
+                    self.trace.append(f"Solution found at depth {depth}")
+                    
+                    # Solution found, return result
+                    
+                    self.is_solving = False
+                    self.solving_complete = True
                     return SearchResult(
-                        best_node=best_node,
-                        expanded_nodes=expanded_nodes,
+                        best_node=self.best_node,
+                        expanded_nodes=self.expanded_nodes,
                         solved=True,
-                        trace=trace
+                        trace=self.trace
                     )
                 
                 # Skip if at max depth
@@ -763,13 +1019,13 @@ class TreeOfThoughtSolver:
                 
                 # Expand node
                 logger.info(f"🌿 Expanding node at depth {depth}")
-                children = self._expand_node(node)
-                expanded_nodes += 1
+                children = await self._expand_node(node)
+                self.expanded_nodes += 1
                 logger.info(f"📈 Generated {len(children)} children")
                 
                 # Update value estimates for optimization
                 for child in children:
-                    quality = self.solution_validator.quality(child.state)
+                    quality = await self.solution_validator.quality(child.state)
                     if quality is not None:
                         if objective == "optimize:min":
                             child.value_estimate = -quality  # Higher is better
@@ -793,27 +1049,27 @@ class TreeOfThoughtSolver:
                     estimate = node.value_estimate or 0.0
                     logger.info(f"  #{i+1}: score={estimate:.3f}, solution='{node.state.candidate_solution or 'None'}'")
                 
-                current_frontier = next_frontier[:self.config.beam_width]
+                self.current_frontier = next_frontier[:self.config.beam_width]
                 
                 # Update best node
-                if current_frontier and (best_node is None or 
-                    (current_frontier[0].value_estimate or 0) > (best_node.value_estimate or 0)):
-                    old_best = best_node.state.candidate_solution if best_node else None
-                    best_node = current_frontier[0]
-                    new_best = best_node.state.candidate_solution
-                    logger.info(f"🏆 New best node: '{old_best}' -> '{new_best}' (score: {best_node.value_estimate:.3f})")
+                if self.current_frontier and (self.best_node is None or 
+                    (self.current_frontier[0].value_estimate or 0) > (self.best_node.value_estimate or 0)):
+                    old_best = self.best_node.state.candidate_solution if self.best_node else None
+                    self.best_node = self.current_frontier[0]
+                    new_best = self.best_node.state.candidate_solution
+                    logger.info(f"🏆 New best node: '{old_best}' -> '{new_best}' (score: {self.best_node.value_estimate:.3f})")
         
-        logger.info(f"🏁 Search completed after {expanded_nodes} expansions")
-        logger.info(f"🎯 Final result: solved={False}, best_solution='{best_node.state.candidate_solution if best_node else None}'")
+        logger.info(f"🏁 Search completed after {self.expanded_nodes} expansions")
+        logger.info(f"🎯 Final result: solved={False}, best_solution='{self.best_node.state.candidate_solution if self.best_node else None}'")
         
         return SearchResult(
-            best_node=best_node,
-            expanded_nodes=expanded_nodes,
+            best_node=self.best_node,
+            expanded_nodes=self.expanded_nodes,
             solved=False,
-            trace=trace
+            trace=self.trace
         )
     
-    def _expand_node(self, node: SubProblemNode) -> List[SubProblemNode]:
+    async def _expand_node(self, node: SubProblemNode) -> List[SubProblemNode]:
         """Expand a node by generating and validating thoughts."""
         # Node logging
         indent = "  " * node.depth
@@ -822,11 +1078,22 @@ class TreeOfThoughtSolver:
         if node.state.scratchpad:
             logger.info(f"{indent}   Previous thoughts: {len(node.state.scratchpad)}")
         
+        # Store input context for this node
+        node.input_context = {
+            "subproblem": node.state.subproblem_text,
+            "scratchpad_length": len(node.state.scratchpad),
+            "depth": node.depth,
+            "max_ideas_hint": self.config.max_ideas_hint_per_node
+        }
+        
         # Generate thoughts
-        thoughts = self.thought_generator.generate(
+        thoughts = await self.thought_generator.generate(
             node.state, 
             self.config.max_ideas_hint_per_node
         )
+        
+        # Store generated thoughts in the node
+        node.generated_thoughts = thoughts.copy()
         
         logger.info(f"💭 Generated {len(thoughts)} thoughts")
         
@@ -863,10 +1130,12 @@ class TreeOfThoughtSolver:
         scored_thoughts = []
         for i, thought in enumerate(thoughts):
             try:
-                score = self.idea_validator.evaluate(node.state, thought)
+                score = await self.idea_validator.evaluate(node.state, thought)
                 if not (0 <= score <= 1):
                     raise ValueError(f"Validator returned invalid score: {score}")
                 scored_thoughts.append((thought, score))
+                # Store score in node for external access
+                node.thought_scores[thought.text] = score
                 logger.info(f"  {i+1}. Score: {score:.3f} - {thought.text[:40]}...")
             except Exception as e:
                 logger.warning(f"Failed to validate thought: {e}")
@@ -935,7 +1204,8 @@ def create_default_solver(config: Optional[SolverConfig] = None, use_llm_validat
 # Example Usage
 # ============================================================================
 
-if __name__ == "__main__":
+async def main():
+    """Example usage of the async TreeOfThoughtSolver."""
     import logging
     
     # Set up clean logging - show only our tree structure and API calls
@@ -947,9 +1217,9 @@ if __name__ == "__main__":
     
     # Turn off other noisy loggers but keep our main one
     logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('aiohttp').setLevel(logging.WARNING)
     
-    logger.info("🌳 Tree-of-Thoughts with Full Logging")
+    logger.info("🌳 Async Tree-of-Thoughts with Full Logging")
     logger.info("="*60)
     
     # Test with the water molecule problem
@@ -959,7 +1229,9 @@ if __name__ == "__main__":
     
     config = SolverConfig(beam_width=2, max_depth=2)
     solver = create_default_solver(config, use_llm_validators=True)
-    result = solver.solve(problem)
+    
+    # Solve asynchronously
+    result = await solver.solve(problem)
     
     logger.info(f"\n{'='*60}")
     logger.info(f"🎯 FINAL RESULTS:")
@@ -968,3 +1240,23 @@ if __name__ == "__main__":
     if result.best_node and result.best_node.state.candidate_solution:
         logger.info(f"   Best solution: {result.best_node.state.candidate_solution}")
     logger.info("="*60)
+    
+    # Example of accessing tree state during/after solving
+    tree_state = solver.get_tree_state()
+    logger.info(f"\n🌳 TREE STATE:")
+    logger.info(f"   Root node: {tree_state['root_node'] is not None}")
+    logger.info(f"   Current depth: {tree_state['current_depth']}")
+    logger.info(f"   Is solving: {tree_state['is_solving']}")
+    logger.info(f"   Solving complete: {tree_state['solving_complete']}")
+    logger.info(f"   Frontier size: {tree_state['frontier_size']}")
+    
+    # Close HTTP sessions
+    await solver.thought_generator.close()
+    if hasattr(solver.idea_validator, 'close'):
+        await solver.idea_validator.close()
+    if hasattr(solver.solution_validator, 'close'):
+        await solver.solution_validator.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

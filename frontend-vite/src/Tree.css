@@ -1,3 +1,10 @@
+/* Tree transition for downward movement */
+.tree-transition {
+  transition: transform 0.8s cubic-bezier(0.4,0,0.2,1);
+}
+.tree-transition--down {
+  transform: translateY(20vh);
+}
 .tree-node-box {
   display: inline-block;
   padding: 10px 18px;

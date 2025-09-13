@@ -17,7 +17,7 @@ function getTreeLayout(root: TreeNode): DrawnNode[] {
   const CHAR_WIDTH = 18; // px per character
   function traverse(node: TreeNode, depth: number): number {
     const labelLength = node.label.length;
-    const nodeWidth = Math.max(48, labelLength * CHAR_WIDTH);
+    const nodeWidth = 50;// Math.max(48, labelLength * CHAR_WIDTH);
     const startX = x;
     let childCount = 0;
     if (node.children && node.children.length > 0) {
@@ -50,13 +50,14 @@ export interface TreeNode {
 
 interface TreeProps {
   data: TreeNode;
+  onNodeClick?: (node: TreeNode) => void;
 }
 
 const NODE_HEIGHT = 40;
 const HORIZONTAL_GAP = 40;
 const VERTICAL_GAP = 80;
 
-const Tree: React.FC<TreeProps> = ({ data }) => {
+const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hoveredNode, setHoveredNode] = useState<DrawnNode | null>(null);
   const [mouse, setMouse] = useState<{x: number, y: number} | null>(null);
@@ -134,11 +135,32 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
       setHoveredNode(null);
       setMouse(null);
     }
+    function handleClick(e: MouseEvent) {
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      for (const node of nodes) {
+        if (
+          mx >= node.x &&
+          mx <= node.x + node.width &&
+          my >= node.y &&
+          my <= node.y + node.height
+        ) {
+          if (onNodeClick) {
+            onNodeClick(node.node);
+          }
+          break;
+        }
+      }
+    }
     canvas.addEventListener('mousemove', handleMove);
     canvas.addEventListener('mouseleave', handleLeave);
+    canvas.addEventListener('click', handleClick);
     return () => {
       canvas.removeEventListener('mousemove', handleMove);
       canvas.removeEventListener('mouseleave', handleLeave);
+      canvas.removeEventListener('click', handleClick);
     };
   }, [data]);
 
@@ -169,7 +191,7 @@ const Tree: React.FC<TreeProps> = ({ data }) => {
           }}
         >
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{hoveredNode.node.label}</div>
-          <div>{hoveredNode.node.description || 'No description'}</div>
+          <div>{hoveredNode.node.description.slice(0, 1000) || 'No description'}</div>
         </div>
       )}
     </div>

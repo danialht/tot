@@ -9,7 +9,7 @@ from tree import SolverConfig, create_default_solver
 
 from dotenv import load_dotenv
 load_dotenv()
-
+TEST_MODE = False
 app = FastAPI()
 
 # Allow CORS for local frontend
@@ -45,21 +45,35 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
+            if TEST_MODE:
+                await websocket.send_text(json.dumps({'output': 'Test mode: not solving'}))
+                continue
             output = await solver.solve(data, log=False)
             keys=['id', 'subproblem', 'chain_of_thought_text', 'incoming_thoughts_texts', 'children_count', 'processing_status', 'terminal_status']
+            # print(solver.root_node.to_dict())
             if not solver.root_node:
                 await websocket.send_text(f"Solver not initialized")
                 continue
-            node = Node(id=solver.root_node.to_dict()['id'],
-                        subproblem=solver.root_node.to_dict()['subproblem'],
-                        chain_of_thought_text=solver.root_node.to_dict()['chain_of_thought_text'],
-                        incoming_thoughts_texts=solver.root_node.to_dict()['incoming_thoughts_texts'],
-                        children_count=solver.root_node.to_dict()['children_count'],
-                        processing_status=solver.root_node.to_dict()['processing_status'],
-                        terminal_status=solver.root_node.to_dict()['terminal_status'])
-            breakpoint()
-            json.dumps(solver.root_node)
-            await websocket.send_text(f"Create a tree")
+            # print(solver.root_node.to_dict().keys())
+            # print(json.dumps(solver.root_node.to_dict()))
+            # node = Node(id=solver.root_node.to_dict()['id'],
+            #             subproblem=solver.root_node.to_dict()['subproblem'],
+            #             chain_of_thought_text=solver.root_node.to_dict()['chain_of_thought_text'],
+            #             incoming_thoughts_texts=solver.root_node.to_dict()['incoming_thoughts_texts'],
+            #             children_count=solver.root_node.to_dict()['children_count'],
+            #             processing_status=solver.root_node.to_dict()['processing_status'],
+            #             terminal_status=solver.root_node.to_dict()['terminal_status'])
+            # breakpoint()
+            print('fuk')
+            print('nothing:?', json.dumps(solver.root_node.to_dict()))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        'output': 'Output',
+                        'tree': solver.root_node.to_dict()
+                    }
+                )
+            )
             # Process the received message
             # await websocket.send_text(f"Message received: {data}")
     except WebSocketDisconnect:

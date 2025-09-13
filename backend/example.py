@@ -182,8 +182,10 @@ if __name__ == "__main__":
         solver = create_default_solver(config, use_llm_validators=False)
         try:
             problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
+            print('What the fuck')
             # Start async solving (will fail without API key, but shows structure)
             result = await solver.solve(problem, log=False)
+            print('What the hell')
             breakpoint()
             # print(solver.root_node)
 

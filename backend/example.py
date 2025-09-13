@@ -7,6 +7,9 @@ Demonstrates how to access tree state, nodes, thoughts, and progress during/afte
 import asyncio
 from tree import SolverConfig, create_default_solver
 
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
+
 async def demonstrate_public_access():
     """Demonstrate all publicly accessible attributes and methods."""
     
@@ -14,59 +17,10 @@ async def demonstrate_public_access():
     print("=" * 60)
     
     # Create solver
-    config = SolverConfig(beam_width=3, max_depth=3)
-    solver = create_default_solver(config, use_llm_validators=False)
     
-    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
+    
+    
 
-    
-    print(f"📋 Problem: {problem}")
-    print()
-    
-    # ============================================================================
-    # 1. SOLVER-LEVEL PUBLIC ATTRIBUTES
-    # ============================================================================
-    print("🔍 1. SOLVER-LEVEL PUBLIC ATTRIBUTES")
-    print("-" * 40)
-    
-    print("Before solving:")
-    print(f"   solver.root_node: {solver.root_node}")
-    print(f"   solver.current_frontier: {solver.current_frontier}")
-    print(f"   solver.best_node: {solver.best_node}")
-    print(f"   solver.expanded_nodes: {solver.expanded_nodes}")
-    print(f"   solver.current_depth: {solver.current_depth}")
-    print(f"   solver.is_solving: {solver.is_solving}")
-    print(f"   solver.solving_complete: {solver.solving_complete}")
-    print(f"   solver.trace: {solver.trace}")
-    print()
-    
-    try:
-        # Start async solving (will fail without API key, but shows structure)
-        result = await solver.solve(problem)
-        
-        print("After solving:")
-        print(f"   solver.root_node: {solver.root_node is not None}")
-        print(f"   solver.current_frontier: {len(solver.current_frontier)} nodes")
-        print(f"   solver.best_node: {solver.best_node is not None}")
-        print(f"   solver.expanded_nodes: {solver.expanded_nodes}")
-        print(f"   solver.current_depth: {solver.current_depth}")
-        print(f"   solver.is_solving: {solver.is_solving}")
-        print(f"   solver.solving_complete: {solver.solving_complete}")
-        print(f"   solver.trace: {len(solver.trace)} entries")
-        
-    except Exception as e:
-        print(f"⚠️  Solving failed (expected without API key): {str(e)[:100]}...")
-        # But we can still show the structure that was created
-        if solver.root_node:
-            print("\nBut root node was created, showing structure:")
-    
-    print()
-    
-    # ============================================================================
-    # 2. TREE STATE SERIALIZATION
-    # ============================================================================
-    print("🗂️  2. TREE STATE SERIALIZATION")
-    print("-" * 40)
     
     tree_state = solver.get_tree_state()
     print("solver.get_tree_state() returns:")
@@ -221,5 +175,31 @@ async def demonstrate_public_access():
     
     print("✨ All public attributes and methods demonstrated!")
 
+
 if __name__ == "__main__":
-    asyncio.run(demonstrate_public_access()) 
+    async def testing():
+        config = SolverConfig(beam_width=3, max_depth=3)
+        solver = create_default_solver(config, use_llm_validators=False)
+        try:
+            problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
+            # Start async solving (will fail without API key, but shows structure)
+            result = await solver.solve(problem, log=False)
+            breakpoint()
+            # print(solver.root_node)
+
+            # print(result)
+            # print("After solving:")
+            # print(f"   solver.root_node: {solver.root_node is not None}")
+            # print(f"   solver.current_frontier: {len(solver.current_frontier)} nodes")
+            # print(f"   solver.best_node: {solver.best_node is not None}")
+            # print(f"   solver.expanded_nodes: {solver.expanded_nodes}")
+            # print(f"   solver.current_depth: {solver.current_depth}")
+            # print(f"   solver.is_solving: {solver.is_solving}")
+            # print(f"   solver.solving_complete: {solver.solving_complete}")
+            # print(f"   solver.trace: {len(solver.trace)} entries")
+            
+        except Exception as e:
+            raise RuntimeError(f"Error: {e}")
+    asyncio.run(
+        testing()
+    ) 

@@ -5,3 +5,6 @@ websockets
 aiohttp
 python-dotenv
 requests
+dotenv
+aiohttp
+requests

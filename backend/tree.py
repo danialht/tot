@@ -939,8 +939,11 @@ class TreeOfThoughtSolver:
         
         return path
     
-    async def solve(self, problem_text: str, objective: str = "default") -> SearchResult:
+    async def solve(self, problem_text: str, objective: str = "default", log: bool = True) -> SearchResult:
         """Solve the problem using Tree-of-Thoughts."""
+        if not log:
+            logging.disable(logging.CRITICAL)
+        
         self.is_solving = True
         self.solving_complete = False
         self.expanded_nodes = 0

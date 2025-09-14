@@ -167,13 +167,17 @@ class ThoughtGenerator(ABC):
     """Abstract base class for generating thoughts."""
     
     @abstractmethod
-    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
-        """Generate thoughts for the given node state."""
+    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None, mode: Optional[str] = None, num_branches: Optional[int] = None) -> List[Thought]:
+        """Generate thoughts for the given node state.
+
+        mode: "idea" for idea-only branches, "solve" for leaf solving. Required.
+        num_branches: required when mode == "idea"; number of idea branches to produce.
+        """
         pass
     
-    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> AsyncIterator[Thought]:
+    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None, mode: Optional[str] = None, num_branches: Optional[int] = None) -> AsyncIterator[Thought]:
         """Generate thoughts with streaming support. Default implementation calls generate()."""
-        thoughts = await self.generate(state, max_ideas_hint)
+        thoughts = await self.generate(state, max_ideas_hint, mode=mode, num_branches=num_branches)
         for thought in thoughts:
             yield thought
 
@@ -286,15 +290,20 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         if self._session and not self._session.closed:
             await self._session.close()
     
-    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> List[Thought]:
+    async def generate(self, state: NodeState, max_ideas_hint: Optional[int] = None, mode: Optional[str] = None, num_branches: Optional[int] = None) -> List[Thought]:
         """Generate thoughts using Cerebras API."""
-        max_ideas = max_ideas_hint or self.config.max_ideas_hint_per_node
+        if mode not in {"idea", "solve"}:
+            raise ValueError(f"ProposeThoughtGenerator.generate requires mode in {'idea','solve'}, got {mode}")
+        if mode == "idea":
+            # Enforce explicit num_branches for idea mode
+            if not isinstance(num_branches, int) or num_branches <= 0:
+                raise ValueError(f"num_branches must be positive int for idea mode, got {num_branches}")
         
-        logger.info(f"🤖 Calling Cerebras API for thought generation")
+        logger.info(f"🤖 Calling Cerebras API for thought generation ({mode})")
         logger.info(f"📝 Subproblem: {state.subproblem_text}")
         logger.info(f"📊 Current scratchpad has {len(state.scratchpad)} thoughts")
         
-        prompt = self._build_prompt(state, max_ideas)
+        prompt = self._build_prompt(state, mode=mode, num_branches=num_branches)
         logger.debug(f"📤 Prompt length: {len(prompt)} chars")
         
         for attempt in range(self.config.max_retries + 1):
@@ -316,6 +325,14 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                 if len(deduplicated) < len(thoughts):
                     logger.info(f"🔄 Deduplicated: {len(thoughts)} -> {len(deduplicated)} thoughts")
                 
+                # Enforce mode-specific constraints
+                if mode == "idea":
+                    # Drop any items that include a direct answer candidate
+                    deduplicated = [t for t in deduplicated if not t.candidate]
+                else:
+                    # solve mode: keep only items that include a candidate answer
+                    deduplicated = [t for t in deduplicated if t.candidate]
+                
                 return deduplicated
                 
             except Exception as e:
@@ -326,35 +343,45 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         
         return []
     
-    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None) -> AsyncIterator[Thought]:
+    async def generate_streaming(self, state: NodeState, max_ideas_hint: Optional[int] = None, mode: Optional[str] = None, num_branches: Optional[int] = None) -> AsyncIterator[Thought]:
         """Generate thoughts with streaming support."""
-        max_ideas = max_ideas_hint or self.config.max_ideas_hint_per_node
+        if mode not in {"idea", "solve"}:
+            raise ValueError(f"ProposeThoughtGenerator.generate_streaming requires mode in {'idea','solve'}, got {mode}")
+        if mode == "idea":
+            if not isinstance(num_branches, int) or num_branches <= 0:
+                raise ValueError(f"num_branches must be positive int for idea mode, got {num_branches}")
         
-        logger.info(f"🤖 Starting streaming thought generation")
+        logger.info(f"🤖 Starting streaming thought generation ({mode})")
         logger.info(f"📝 Subproblem: {state.subproblem_text}")
         
-        prompt = self._build_prompt(state, max_ideas)
+        prompt = self._build_prompt(state, mode=mode, num_branches=num_branches)
         
         async for thought in self._call_cerebras_streaming(prompt):
+            # Enforce mode-specific filtering on the fly
+            if mode == "idea" and thought.candidate:
+                continue
+            if mode == "solve" and not thought.candidate:
+                continue
             yield thought
     
-    def _build_prompt(self, state: NodeState, max_ideas: Optional[int]) -> str:
+    def _build_prompt(self, state: NodeState, mode: str, num_branches: Optional[int]) -> str:
         """Build the prompt for thought generation using configured templates."""
         # Build context string
         context = build_context_string(state.scratchpad, state.candidate_solution)
         
-        # Hints for counts
-        max_hint = str(max_ideas) if max_ideas else "3"
-        up_to_hint = str(max_ideas) if max_ideas else "3"
-        
-        # Prefer flexible idea-or-direct generation; fall back if missing
-        template = PROMPTS.get("idea_or_direct_generation")
-        prompt = template.format(
-            problem=state.subproblem_text,
-            context=context,
-            max_hint=max_hint,
-            up_to_hint=up_to_hint
-        )
+        if mode == "idea":
+            template = PROMPTS["idea_generation_fixed"]
+            prompt = template.format(
+                problem=state.subproblem_text,
+                context=context,
+                num_branches=int(num_branches)
+            )
+        else:
+            template = PROMPTS["leaf_solver"]
+            prompt = template.format(
+                problem=state.subproblem_text,
+                context=context
+            )
         
         # Log the full prompt being sent
         logger.info(f"    🤖 THOUGHT GENERATION:")
@@ -1034,6 +1061,11 @@ class TreeOfThoughtSolver:
         self.thought_generator = thought_generator
         self.idea_validator = idea_validator
         self.solution_validator = solution_validator
+        # Synthesis prompt support
+        self._synth_api_key = os.getenv("CEREBRAS_API_KEY")
+        self._synth_base_url = "https://api.cerebras.ai/v1"
+        # Collected leaf candidates for post-hoc validation-based selection
+        self._leaf_candidates: List[Dict[str, Any]] = []
         
         # Public tree state attributes
         self.root_node: Optional[SubProblemNode] = None
@@ -1126,17 +1158,42 @@ class TreeOfThoughtSolver:
         
         # For root, we package using the chosen first-level idea if available; otherwise just solution
         final_solution_text = result.get("solution_text")
+        final_reasoning_text = result.get("reasoning_text")
         self.final_solution_text = final_solution_text
         self.root_candidates = result.get("candidates") or []
         if final_solution_text:
             # If root has an incoming_thought (it should not), include; otherwise omit
             if self.root_node.incoming_thought and self.root_node.incoming_thought.text:
-                package = self._package_idea_and_solution(self.root_node.incoming_thought.text, final_solution_text)
+                package = self._package_idea_solution_reasoning(self.root_node.incoming_thought.text, final_solution_text, final_reasoning_text)
             else:
                 # Root: no incoming idea; return solution only
-                package = self._package_idea_and_solution(None, final_solution_text)
+                package = self._package_idea_solution_reasoning(None, final_solution_text, final_reasoning_text)
             self.root_node.state.candidate_solution = package
             self.root_node.terminal_status = "solved" if result.get("solved") else None
+            # Expose packaged final answer with reasoning
+            self.final_solution_text = package
+        
+        # Post-hoc: Evaluate all leaf candidates relative to the original problem and select highest score
+        try:
+            if self._leaf_candidates:
+                logger.info("\n🔎 Post-hoc validation over leaf candidates (original problem context)")
+                scored: List[Dict[str, Any]] = []
+                for cand in self._leaf_candidates:
+                    sol = cand.get("solution_text") or ""
+                    rsn = cand.get("reasoning_text") or ""
+                    score = await self._score_solution_via_validation(problem_text, sol, rsn)
+                    scored.append({**cand, "validation_score": score})
+                if scored:
+                    scored.sort(key=lambda c: c.get("validation_score") or 0.0, reverse=True)
+                    top = scored[0]
+                    logger.info(f"🏆 Highest-scoring leaf validation: {top.get('validation_score'):.3f}")
+                    # Override final with best validated leaf
+                    override_package = self._package_idea_solution_reasoning(None, top.get("solution_text") or "", top.get("reasoning_text") or "")
+                    self.root_node.state.candidate_solution = override_package
+                    self.final_solution_text = override_package
+                    self.root_candidates = scored
+        except Exception as e:
+            logger.warning(f"Leaf validation selection failed: {e}")
         else:
             self.root_node.state.candidate_solution = None
             self.root_node.terminal_status = None
@@ -1162,9 +1219,17 @@ class TreeOfThoughtSolver:
             return f"Solution: {solution_text}"
         return f"Idea: {idea_text}\nSolution: {solution_text}"
 
-    async def _evaluate_in_parent_context(self, parent_problem_text: str, solution_text: str) -> Dict[str, Any]:
-        """Evaluate a solution string in the given problem context using the solution validator."""
-        temp_state = NodeState(subproblem_text=parent_problem_text, candidate_solution=solution_text)
+    def _package_idea_solution_reasoning(self, idea_text: Optional[str], solution_text: str, reasoning_text: Optional[str]) -> str:
+        """Create a package string including idea, solution, and reasoning."""
+        base = self._package_idea_and_solution(idea_text, solution_text)
+        if reasoning_text and str(reasoning_text).strip():
+            return f"{base}\nReasoning: {reasoning_text}"
+        return base
+
+    async def _evaluate_in_parent_context(self, parent_problem_text: str, solution_text: str, reasoning_text: Optional[str]) -> Dict[str, Any]:
+        """Evaluate solution+reasoning in the given problem context using the solution validator."""
+        combined = solution_text if not (reasoning_text and reasoning_text.strip()) else f"{solution_text}\n\nReasoning: {reasoning_text}"
+        temp_state = NodeState(subproblem_text=parent_problem_text, candidate_solution=combined)
         try:
             solved = await self.solution_validator.is_solved(temp_state)
         except Exception as e:
@@ -1184,39 +1249,73 @@ class TreeOfThoughtSolver:
         logger.info(f"{indent}   Problem: {node.state.subproblem_text}")
         node.processing_status = "processing"
         
-        # Generate thoughts (ideas and/or direct answers)
-        thoughts = await self.thought_generator.generate(
-            node.state,
-            self.config.max_ideas_hint_per_node
-        )
+        # Decide mode and expected branching per fixed topology
+        if node.depth < 2:
+            mode = "idea"
+            
+            required_branches = 3 if node.depth == 0 else 2
+            thoughts = await self.thought_generator.generate(
+                node.state,
+                None,
+                mode=mode,
+                num_branches=required_branches
+            )
+            # Failfast: ensure exactly required number of unique ideas
+            if len(thoughts) != required_branches:
+                logger.warning(f"{indent}Expected exactly {required_branches} idea branches, got {len(thoughts)}")
+                # Retry once with the same parameters
+                retry = await self.thought_generator.generate(
+                    node.state,
+                    None,
+                    mode=mode,
+                    num_branches=required_branches
+                )
+                thoughts = retry
+            if len(thoughts) != required_branches:
+                raise ValueError(f"Fixed-topology violation at depth {node.depth}: needed {required_branches} ideas, got {len(thoughts)}")
+        else:
+            mode = "solve"
+            required_branches = 1  # single solve attempt set
+            thoughts = await self.thought_generator.generate(
+                node.state,
+                None,
+                mode=mode,
+                num_branches=None
+            )
+            if len(thoughts) < 1:
+                logger.warning(f"{indent}Leaf produced no solutions; retrying once")
+                retry = await self.thought_generator.generate(
+                    node.state,
+                    None,
+                    mode=mode,
+                    num_branches=None
+                )
+                thoughts = retry
         node.generated_thoughts = thoughts.copy()
         logger.info(f"{indent}💭 Generated {len(thoughts)} thoughts")
         
-        # Score thoughts for possible tie-breaks
+        # Score thoughts (no external validation; neutral scores)
         scored_thoughts: List[tuple] = []
         for t in thoughts:
-            # If this thought proposes a direct answer, skip idea validation
-            if t.candidate:
-                node.thought_scores[t.text] = 0.0  # tie-breaker only; real validation via solution validator
-                scored_thoughts.append((t, 0.0))
-                logger.info(f"{indent}  Skipping idea validation for direct answer thought")
-                continue
-            try:
-                score = await self.idea_validator.evaluate(node.state, t)
-            except Exception as e:
-                logger.warning(f"{indent}Idea evaluation failed: {e}")
-                score = 0.0
-            node.thought_scores[t.text] = score
-            scored_thoughts.append((t, score))
+            node.thought_scores[t.text] = 0.0
+            scored_thoughts.append((t, 0.0))
         
-        # Separate direct answer candidates and branch ideas
-        direct_candidates: List[Thought] = [t for t, _ in scored_thoughts if t.candidate]
-        branch_ideas_scored: List[tuple] = [(t, s) for t, s in scored_thoughts if t.intent == "idea"]
-        
-        # If at depth cap, do not branch further
-        if node.depth >= depth_cap:
+        # Separate by mode
+        if mode == "solve":
+            direct_candidates: List[Thought] = [t for t, _ in scored_thoughts if t.candidate]
             branch_ideas_scored = []
-            logger.info(f"{indent}⏹️ Reached depth cap {depth_cap}; considering only direct solutions")
+        else:
+            direct_candidates = []
+            branch_ideas_scored: List[tuple] = [(t, s) for t, s in scored_thoughts]
+        
+        # Enforce exact branching counts at internal nodes
+        total_ideas = len(branch_ideas_scored)
+        if mode == "idea":
+            branch_ideas_scored.sort(key=lambda x: x[1], reverse=True)
+            if total_ideas < required_branches:
+                logger.warning(f"{indent}Fewer ideas than required ({total_ideas} < {required_branches}); proceeding with available")
+            branch_ideas_scored = branch_ideas_scored[: required_branches]
+            logger.info(f"{indent}✅ Selected {len(branch_ideas_scored)} ideas for branching (required {required_branches})")
         
         # Recursively compute child solutions for each idea
         child_results: List[Dict[str, Any]] = []
@@ -1244,6 +1343,7 @@ class TreeOfThoughtSolver:
                 "idea": idea,
                 "idea_score": idea_score,
                 "solution_text": child_best.get("solution_text"),
+                "reasoning_text": child_best.get("reasoning_text"),
                 "solved": child_best.get("solved", False),
                 "quality": child_best.get("quality")
             })
@@ -1252,16 +1352,40 @@ class TreeOfThoughtSolver:
         parent_problem = node.state.subproblem_text
         candidates: List[Dict[str, Any]] = []
         
-        # Direct solutions proposed at this node
+        # Helper to build reasoning text from a Thought (use Why + Insights bullets if any)
+        def build_reasoning(thought: Thought) -> str:
+            parts: List[str] = []
+            if thought.rationale and thought.rationale.strip() and thought.rationale.strip().lower() != "no rationale provided":
+                parts.append(thought.rationale.strip())
+            insights = thought.metadata.get("insights") if isinstance(thought.metadata, dict) else None
+            if insights and isinstance(insights, list):
+                bullets = [f"- {str(x).strip()}" for x in insights if str(x).strip()]
+                if bullets:
+                    parts.append("Insights:\n" + "\n".join(bullets))
+            return "\n".join(parts).strip()
+
+        # Direct solutions proposed at this node (no validation)
         for t in direct_candidates:
             sol_text = t.candidate or ""
-            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text)
+            reasoning_text = build_reasoning(t)
+            # If this is a leaf node (mode == 'solve' and no further branching), collect globally
+            if mode == "solve":
+                try:
+                    self._leaf_candidates.append({
+                        "origin": "leaf",
+                        "solution_text": sol_text,
+                        "reasoning_text": reasoning_text,
+                        "path_idea": node.incoming_thought.text if node.incoming_thought else None
+                    })
+                except Exception:
+                    pass
             candidates.append({
                 "origin": "direct",
                 "idea_text": None,
                 "solution_text": sol_text,
-                "solved": eval_res["solved"],
-                "quality": eval_res.get("quality") or 0.0,
+                "reasoning_text": reasoning_text,
+                "solved": None,
+                "quality": 0.0,
                 "tie_score": node.thought_scores.get(t.text, 0.0)
             })
         
@@ -1270,36 +1394,50 @@ class TreeOfThoughtSolver:
             sol_text = child_info.get("solution_text")
             if not sol_text:
                 continue
-            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text)
+            reasoning_text = child_info.get("reasoning_text")
             candidates.append({
                 "origin": "child",
                 "idea_text": child_info["idea"].text,
                 "solution_text": sol_text,
-                "solved": eval_res["solved"],
-                "quality": eval_res.get("quality") or 0.0,
+                "reasoning_text": reasoning_text,
+                "solved": None,
+                "quality": 0.0,
                 "tie_score": float(child_info.get("idea_score") or 0.0)
             })
         
-        # Pick best candidate: prefer solved, then higher quality, then tie_score
-        def rank_key(c: Dict[str, Any]):
-            return (1 if c["solved"] else 0, c.get("quality") or 0.0, c.get("tie_score") or 0.0)
+        # If we have multiple candidates (or one), synthesize a single best answer
         best_candidate: Optional[Dict[str, Any]] = None
         if candidates:
-            candidates.sort(key=rank_key, reverse=True)
-            best_candidate = candidates[0]
-            logger.info(f"{indent}🏆 Selected candidate (solved={best_candidate['solved']}, quality={best_candidate['quality']})")
+            logger.info(f"{indent}🧪 Synthesizing across {len(candidates)} candidate(s)")
+            synthesis = await self._synthesize_candidates(parent_problem, candidates)
+            if synthesis and synthesis.get("solution_text"):
+                best_candidate = {
+                    "origin": "synthesized",
+                    "idea_text": None,
+                    "solution_text": synthesis.get("solution_text"),
+                    "reasoning_text": synthesis.get("reasoning_text"),
+                    "solved": True,
+                    "quality": synthesis.get("quality") or 0.0,
+                    "tie_score": 0.0
+                }
+                logger.info(f"{indent}🏆 Synthesized candidate selected")
+            else:
+                logger.warning(f"{indent}Synthesis failed to produce an answer; falling back")
+                best_candidate = candidates[0]
         else:
             logger.info(f"{indent}❌ No candidates produced at this node")
         
         # Prepare return to parent: package with this node's incoming idea
         if best_candidate:
             selected_solution_text = best_candidate["solution_text"]
+            selected_reasoning_text = best_candidate.get("reasoning_text")
             # Update node state with local packaging for visibility
             incoming_idea_text = node.incoming_thought.text if node.incoming_thought else None
-            node.state.candidate_solution = self._package_idea_and_solution(incoming_idea_text, selected_solution_text)
+            node.state.candidate_solution = self._package_idea_solution_reasoning(incoming_idea_text, selected_solution_text, selected_reasoning_text)
             node.terminal_status = "solved" if best_candidate["solved"] else None
             return {
                 "solution_text": selected_solution_text,
+                "reasoning_text": selected_reasoning_text,
                 "solved": best_candidate["solved"],
                 "quality": best_candidate.get("quality"),
                 "candidates": candidates
@@ -1307,7 +1445,117 @@ class TreeOfThoughtSolver:
         else:
             node.state.candidate_solution = None
             node.terminal_status = None
-            return {"solution_text": None, "solved": False, "quality": None, "candidates": candidates}
+            return {"solution_text": None, "reasoning_text": None, "solved": False, "quality": None, "candidates": candidates}
+
+    async def _synthesize_candidates(self, problem_text: str, candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Call Cerebras to synthesize the best answer from multiple candidates with reasoning."""
+        try:
+            # Format candidates as labeled blocks A, B, C, ...
+            labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            blocks: List[str] = []
+            for idx, c in enumerate(candidates):
+                label = labels[idx % len(labels)]
+                sol = str(c.get("solution_text") or "").strip()
+                rsn = str(c.get("reasoning_text") or "").strip()
+                block = f"Solution {label}: {sol}\nReasoning {label}: {rsn}\n---"
+                blocks.append(block)
+            candidates_block = "\n".join(blocks)
+            prompt = PROMPTS["solution_synthesis"].format(problem=problem_text, candidates=candidates_block)
+
+            # Log synthesis prompt
+            logger.info(f"    🤖 SOLUTION SYNTHESIS:")
+            logger.info(f"    {'-'*50}")
+            for line in prompt.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+
+            # Reuse ProposeThoughtGenerator HTTP logic via a minimal inline call
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {self._synth_api_key}", "Content-Type": "application/json"}
+                data = {
+                    "model": self.config.cerebras_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": self.config.temperature,
+                    "max_tokens": self.config.max_tokens
+                }
+                logger.info("    🌐 POST /chat/completions (synthesis)")
+                async with session.post(f"{self._synth_base_url}/chat/completions", headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
+                        return None
+                    result = await response.json()
+                    content = result.get("choices", [{}])[0].get("message", {}).get("content")
+                    if not content:
+                        return None
+
+            # Log synthesis output
+            logger.info(f"    📥 SYNTHESIS OUTPUT:")
+            logger.info(f"    {'-'*50}")
+            for line in content.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+
+            # Parse using existing thought parser to extract Why/Answer
+            parsed = ProposeThoughtGenerator(self.config)._parse_thoughts(content)
+            # Expect a single branch; pick first
+            if not parsed:
+                return None
+            t = parsed[0]
+            solution_text = (t.candidate or "").strip()
+            reasoning_text = (t.rationale or "").strip()
+            if not solution_text:
+                return None
+            return {"solution_text": solution_text, "reasoning_text": reasoning_text, "quality": 0.0}
+        except Exception as e:
+            logger.warning(f"Synthesis error: {e}")
+            return None
+
+    async def _score_solution_via_validation(self, problem_text: str, solution_text: str, reasoning_text: Optional[str]) -> float:
+        """Score a solution using the solution_validation prompt; parse Confidence as score."""
+        try:
+            combined = solution_text if not (reasoning_text and reasoning_text.strip()) else f"{solution_text}\n\nReasoning: {reasoning_text}"
+            prompt = PROMPTS["solution_validation"].format(problem=problem_text, solution=combined)
+            # Log the full validation prompt
+            logger.info("    🤖 LEAF SOLUTION VALIDATION:")
+            logger.info(f"    {'-'*50}")
+            for line in prompt.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {self._synth_api_key}", "Content-Type": "application/json"}
+                data = {
+                    "model": self.config.cerebras_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": self.config.temperature,
+                    "max_tokens": self.config.max_tokens
+                }
+                async with session.post(f"{self._synth_base_url}/chat/completions", headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status != 200:
+                        _ = await response.text()
+                        return 0.0
+                    result = await response.json()
+                    content = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
+            # Log the validation output
+            logger.info("    📥 VALIDATION OUTPUT:")
+            logger.info(f"    {'-'*50}")
+            for line in content.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+            m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", content, re.IGNORECASE)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    return max(0.0, min(1.0, val))
+                except Exception:
+                    return 0.0
+            # Fallback to Correct yes/no
+            c = re.search(r"Correct:\s*(yes|no)", content.lower())
+            if c and c.group(1) == "yes":
+                return 0.6
+            return 0.0
+        except Exception:
+            return 0.0
     
     async def _expand_node(self, node: SubProblemNode) -> List[SubProblemNode]:
         """Expand a node by generating and validating thoughts."""
@@ -1502,7 +1750,14 @@ async def main():
     logger.info("="*60)
     
     # Test with the water molecule problem
-    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass'
+    PROBLEM1 = "Add (normal) quotes to the make the following true in three different ways: \n\n Sam is flying to Europe is a sentence and is an expression."
+    PROBLEM2 = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass.'
+    PROBLEM3 = "You have access to a 2sided dice, 3, 5... up to 41 (only the prime numbered ones). What is a strategy that strictly guarantees a 42 sided dice by rolling twice? One roll operation is picking 1 dice and rolling it once."
+    PROBLEM4 = "My pottery person made my mug wrong. The bottom is open and the top has been water-proof sealed. Can I still use the mug to hold water?"
+    PROBLEM5 = "What you might make to express an emotion; what you need to do with your problems to defeat them? Clue: 4 letter word with the last letter being e"
+    PROBLEM6 = "What you might put out to ascertain where someone’s at? Clue: *E**E*"
+    PROBLEM7 = "By sounding it out, and counting with your fingers, the answer will come. Clue: *A**U"
+    problem = PROBLEM1
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     

@@ -1,5 +1,6 @@
 import React from 'react';
 import './PopupWindow.css';
+import MathText from './MathText';
 
 interface PopupWindowProps {
   isOpen: boolean;
@@ -27,8 +28,8 @@ const PopupWindow: React.FC<PopupWindowProps & { title?: string; description?: s
       <div className="popup-window">
         <button className="popup-close" onClick={onClose} aria-label="Close">×</button>
         <div className="popup-content">
-          <h2>{title}</h2>
-          <p>{description}</p>
+          <h2><MathText text={title || ''} /></h2>
+          <p><MathText text={description || ''} /></p>
           {children}
         </div>
       </div>

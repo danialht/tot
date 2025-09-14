@@ -126,11 +126,13 @@
   padding: 0;
   width: 100%;
   height: 100%;
-  overflow: hidden;
+  overflow: auto; /* allow both directions; we center horizontally with offsets */
 }
 
 .treeScroll > div {
-  display: inline-block; /* Prevent canvas from stretching */
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 /* moved earlier */
 

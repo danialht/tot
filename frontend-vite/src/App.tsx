@@ -3,6 +3,7 @@ import "./App.css";
 import Tree from "./Tree";
 import type { TreeNode } from "./Tree";
 import PopupWindow from "./PopupWindow";
+import MathText from "./MathText";
 
 const initialTree: TreeNode = {
   id: "Idea",
@@ -16,23 +17,66 @@ const initialTree: TreeNode = {
   ],
 };
 
-function makeTreeFromData(obj: any): TreeNode {
-  // console.log('DEBUG');
-  // console.log(obj);
+function extractAssumeIdeaSegments(text: string | undefined | null): string[] {
+  if (!text || typeof text !== 'string') return [];
+  const pattern = /Assume\/Idea:\s*([\s\S]*?)(?=\n?\s*Why\b|$)/gi;
+  const segments: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const raw = match[1] || '';
+    const oneLine = raw.replace(/\s+/g, ' ').trim();
+    if (oneLine) segments.push(oneLine);
+  }
+  return segments;
+}
+
+function truncateForLabel(label: string, max = 60): string {
+  if (label.length <= max) return label;
+  return label.slice(0, max - 1).trimEnd() + '…';
+}
+
+function makeTreeFromData(obj: any, depth: number = 0): TreeNode {
+  const segments = extractAssumeIdeaSegments(obj?.chain_of_thought_text);
+  const idx = Math.max(0, depth - 1);
+
+  // Prefer backend-provided concise title/idea, with safe fallbacks
+  const rawLabel = depth === 0
+    ? (obj?.branch_title || obj?.subproblem)
+    : (obj?.branch_title || obj?.branch_idea || obj?.incoming_thought_text || segments[idx] || obj?.subproblem);
+  const computedLabel = truncateForLabel(String(rawLabel || 'Idea'));
+
+  // Build a compact, conditional description (hide empty sections)
+  const parts: string[] = [];
+  const add = (title: string, value: any, multiline: boolean = false) => {
+    if (value === null || value === undefined) return;
+    const str = String(value).trim();
+    if (!str) return;
+    parts.push(multiline ? `${title}:\n${str}` : `${title}: ${str}`);
+  };
+
+  // Idea for non-root nodes
+  if (depth > 0) {
+    add('Idea', obj?.branch_idea || obj?.incoming_thought_text);
+  }
+  // Solution and Reasoning if present
+  add('Solution', obj?.solution_text || obj?.solution_package);
+  add('Reasoning', obj?.reasoning_text, true);
+  // Removed Chain of thought from description
+  // Always show subproblem at root; optional otherwise
+  if (depth === 0) {
+    add('Subproblem', obj?.subproblem, true);
+  }
+
   const node: TreeNode = {
     id: obj.id,
-    label: "Idea", // obj.subproblem || 'No Subproblem',
-    description:
-      "Chain of thought: \n" +
-        obj.chain_of_thought_text +
-        "\nSubproblem:\n" +
-        obj.subproblem || "",
+    label: computedLabel,
+    description: parts.join('\n\n'),
     children: [],
     hidden: true,
   };
   if (obj.children && Array.isArray(obj.children)) {
     node.children = obj.children.map((childObj: any) =>
-      makeTreeFromData(childObj)
+      makeTreeFromData(childObj, depth + 1)
     );
   }
   return node;
@@ -125,7 +169,7 @@ function App() {
         if (!hasFirstPromptBeenAnswered) setHasFirstPromptBeenAnswered(true);
         setIsBotTyping(false);
         setMessages((msgs) => [...msgs, "tot: " + obj["output"]]);
-        const tree = makeTreeFromData(obj.tree);
+        const tree = makeTreeFromData(obj.tree, 0);
         // console.log('Received tree from server:', tree);    
         animateTree(tree);
     };
@@ -183,7 +227,7 @@ function App() {
                   key={i}
                   className={"message " + (i % 2 === 0 ? "user" : "bot")}
                 >
-                  {msg}
+                  <MathText text={msg} />
                 </div>
               ))}
               {isBotTyping && (
@@ -290,7 +334,7 @@ function App() {
                         key={i}
                         className={"message " + (i % 2 === 0 ? "user" : "bot")}
                       >
-                        {msg}
+                        <MathText text={msg} />
                       </div>
                     ))}
                     {isBotTyping && (

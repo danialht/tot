@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import './Tree.css';
+import MathText from './MathText';
 
 // Type for a node with layout info
 interface DrawnNode {
@@ -58,9 +59,41 @@ interface TreeProps {
 }
 
 const NODE_WIDTH = 160;
-const NODE_HEIGHT = 56;
+const NODE_HEIGHT = 88;
 const HORIZONTAL_GAP = 110;
-const VERTICAL_GAP = 160;
+const VERTICAL_GAP = 220;
+
+function wrapLabelText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = (text || '').split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? current + ' ' + word : word;
+    if (ctx.measureText(test).width <= maxWidth) {
+      current = test;
+    } else {
+      if (current) lines.push(current);
+      // If a single word is longer than maxWidth, hard-break it
+      if (ctx.measureText(word).width > maxWidth) {
+        let slice = '';
+        for (const ch of word) {
+          const next = slice + ch;
+          if (ctx.measureText(next).width <= maxWidth) {
+            slice = next;
+          } else {
+            if (slice) lines.push(slice);
+            slice = ch;
+          }
+        }
+        current = slice;
+      } else {
+        current = word;
+      }
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [''];
+}
 
 const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -68,6 +101,7 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
   const [hoveredNode, setHoveredNode] = useState<DrawnNode | null>(null);
   const [mouse, setMouse] = useState<{x: number, y: number} | null>(null);
   const [containerSize, setContainerSize] = useState<{width: number, height: number}>({ width: 0, height: 0 });
+  const [transform, setTransform] = useState<{ scale: number; offsetX: number; offsetY: number }>({ scale: 1, offsetX: 0, offsetY: 0 });
 
   // Observe container size to make canvas responsive
   useEffect(() => {
@@ -91,17 +125,33 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Prepare measurement
+    ctx.font = '700 18px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
+    const lineHeight = 22;
+    const paddingV = 12;
+    const textMaxWidth = NODE_WIDTH - 20;
+    const renderInfo = nodes.map(n => {
+      const displayLabel = n.node.id === data.id ? 'Start' : n.node.label;
+      const lines = wrapLabelText(ctx, displayLabel, textMaxWidth);
+      const dynamicHeight = Math.max(NODE_HEIGHT, lines.length * lineHeight + paddingV * 2);
+      return { n, lines, dynamicHeight };
+    });
+
     // Compute content bounds
-    const contentWidth = nodes.length > 0 ? Math.max(...nodes.map(n => n.x + n.width)) + 40 : 400;
-    const contentHeight = nodes.length > 0 ? Math.max(...nodes.map(n => n.y + NODE_HEIGHT)) + 40 : 300;
+    const contentWidth = renderInfo.length > 0 ? Math.max(...renderInfo.map(r => r.n.x + r.n.width)) + 40 : 400;
+    const contentHeight = renderInfo.length > 0 ? Math.max(...renderInfo.map(r => r.n.y + r.dynamicHeight)) + 40 : 300;
 
-    const targetWidth = Math.max(1, containerSize.width || contentWidth);
-    const targetHeight = Math.max(1, containerSize.height || contentHeight);
-
-    // Fit content inside container (letterbox) while preserving aspect ratio
-    const scale = Math.min(targetWidth / contentWidth, targetHeight / contentHeight);
+    // Fit horizontally, allow vertical scroll
+    const containerW = Math.max(1, containerSize.width || contentWidth);
+    const containerH = Math.max(1, containerSize.height || contentHeight);
+    const scale = Math.min(containerW / contentWidth, containerH / contentHeight);
+    const targetWidth = Math.max(1, containerW);
+    const targetHeight = Math.max(1, containerH);
     const offsetX = (targetWidth - contentWidth * scale) / 2;
     const offsetY = (targetHeight - contentHeight * scale) / 2;
+
+    // Persist transform so hover/click hit-testing and tooltip align with drawing
+    setTransform({ scale, offsetX, offsetY });
 
     // Set backing store size and CSS size for Hi-DPI
     canvas.width = Math.floor(targetWidth * dpr);
@@ -115,20 +165,23 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
 
     // Pull theme variables for consistent styling
     const styles = getComputedStyle(document.documentElement);
-    const surface2 = (styles.getPropertyValue('--surface-2') || 'rgba(255,255,255,0.08)').trim();
     const textPrimary = (styles.getPropertyValue('--text-primary') || '#ffffff').trim();
+    const brandStart = (styles.getPropertyValue('--brand-start') || '#667eea').trim();
+    const brandEnd = (styles.getPropertyValue('--brand-end') || '#764ba2').trim();
 
     // Draw connectors
-    for (const node of nodes) {
+    for (const r of renderInfo) {
+      const node = r.n;
+      const nodeH = r.dynamicHeight;
       if (node.node.children && node.node.children.length > 0) {
         for (const child of node.node.children) {
-          const childNode = nodes.find(n => n.node.id === child.id);
-          if (childNode) {
+          const childInfo = renderInfo.find(x => x.n.node.id === child.id);
+          if (childInfo) {
             // Bezier connector
             const startX = node.x + node.width / 2;
-            const startY = node.y + NODE_HEIGHT;
-            const endX = childNode.x + childNode.width / 2;
-            const endY = childNode.y;
+            const startY = node.y + nodeH;
+            const endX = childInfo.n.x + childInfo.n.width / 2;
+            const endY = childInfo.n.y;
             const cpY = (startY + endY) / 2; // vertical midpoint for curve
             ctx.beginPath();
             ctx.moveTo(startX, startY);
@@ -151,21 +204,18 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
     }
 
     // Draw nodes
-    for (const node of nodes) {
+    for (const r of renderInfo) {
+      const node = r.n;
+      const nodeH = r.dynamicHeight;
       const isHovered = hoveredNode && hoveredNode.node.id === node.node.id;
       
-      // Base node background using chat response surface color
+      // Node background: same gradient as Send button
       ctx.beginPath();
-      ctx.roundRect(node.x, node.y, node.width, NODE_HEIGHT, 16);
-      ctx.fillStyle = surface2;
-      ctx.fill();
-
-      // Subtle top highlight for depth
-      const highlight = ctx.createLinearGradient(node.x, node.y, node.x, node.y + NODE_HEIGHT);
-      highlight.addColorStop(0, 'rgba(255, 255, 255, 0.06)');
-      highlight.addColorStop(0.6, 'rgba(255, 255, 255, 0.02)');
-      highlight.addColorStop(1, 'rgba(255, 255, 255, 0.00)');
-      ctx.fillStyle = highlight;
+      ctx.roundRect(node.x, node.y, node.width, nodeH, 16);
+      const nodeFill = ctx.createLinearGradient(node.x, node.y, node.x + node.width, node.y + nodeH);
+      nodeFill.addColorStop(0, brandStart);
+      nodeFill.addColorStop(1, brandEnd);
+      ctx.fillStyle = nodeFill;
       ctx.fill();
       
       // Draw node border
@@ -190,8 +240,13 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
       ctx.fillStyle = textPrimary || '#fff';
       ctx.font = '700 17px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(node.node.label, node.x + node.width / 2, node.y + NODE_HEIGHT / 2);
+      ctx.textBaseline = 'alphabetic';
+      const totalTextHeight = r.lines.length * lineHeight;
+      const startY = node.y + (nodeH - totalTextHeight) / 2 + lineHeight - 2;
+      const centerX = node.x + node.width / 2;
+      for (let i = 0; i < r.lines.length; i++) {
+        ctx.fillText(r.lines[i], centerX, startY + i * lineHeight);
+      }
       
       // Reset shadow
       ctx.shadowBlur = 0;
@@ -205,14 +260,21 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const nodes = getTreeLayout(data);
-    // Content bounds and transform for hit-testing
-    const contentWidth = nodes.length > 0 ? Math.max(...nodes.map(n => n.x + n.width)) + 40 : 400;
-    const contentHeight = nodes.length > 0 ? Math.max(...nodes.map(n => n.y + NODE_HEIGHT)) + 40 : 300;
-    const targetWidth = Math.max(1, containerSize.width || contentWidth);
-    const targetHeight = Math.max(1, containerSize.height || contentHeight);
-    const scale = Math.min(targetWidth / contentWidth, targetHeight / contentHeight);
-    const offsetX = (targetWidth - contentWidth * scale) / 2;
-    const offsetY = (targetHeight - contentHeight * scale) / 2;
+    // Prepare measurement context for hit-testing and bounds
+    const mctx = canvas.getContext('2d');
+    if (!mctx) return;
+    mctx.font = '700 18px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
+    const lineHeight = 22;
+    const paddingV = 12;
+    const textMaxWidth = NODE_WIDTH - 20;
+    const renderBounds = nodes.map(n => {
+      const displayLabel = n.node.id === data.id ? 'Start' : n.node.label;
+      const lines = wrapLabelText(mctx, displayLabel, textMaxWidth);
+      const dynamicHeight = Math.max(NODE_HEIGHT, lines.length * lineHeight + paddingV * 2);
+      return { ...n, height: dynamicHeight } as DrawnNode;
+    });
+    // Use the same transform as the drawing pass
+    const { scale, offsetX, offsetY } = transform;
     function handleMove(e: MouseEvent) {
       if (!canvas){
         throw new Error("Canvas element is not available");
@@ -225,7 +287,7 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
       const cx = (mx - offsetX) / scale;
       const cy = (my - offsetY) / scale;
       let found = null;
-      for (const node of nodes) {
+      for (const node of renderBounds) {
         if (
           cx >= node.x &&
           cx <= node.x + node.width &&
@@ -249,7 +311,7 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
       const my = e.clientY - rect.top;
       const cx = (mx - offsetX) / scale;
       const cy = (my - offsetY) / scale;
-      for (const node of nodes) {
+      for (const node of renderBounds) {
         if (
           cx >= node.x &&
           cx <= node.x + node.width &&
@@ -271,17 +333,10 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
       canvas.removeEventListener('mouseleave', handleLeave);
       canvas.removeEventListener('click', handleClick);
     };
-  }, [data, containerSize]);
+  }, [data, containerSize, transform]);
 
   // Calculate canvas size
-  const nodes = getTreeLayout(data);
-  const contentWidth = nodes.length > 0 ? Math.max(...nodes.map(n => n.x + n.width)) + 40 : 400;
-  const contentHeight = nodes.length > 0 ? Math.max(...nodes.map(n => n.y + NODE_HEIGHT)) + 40 : 300;
-  const targetWidth = Math.max(1, containerSize.width || contentWidth);
-  const targetHeight = Math.max(1, containerSize.height || contentHeight);
-  const scale = Math.min(targetWidth / contentWidth, targetHeight / contentHeight);
-  const offsetX = (targetWidth - contentWidth * scale) / 2;
-  const offsetY = (targetHeight - contentHeight * scale) / 2;
+  const tooltipTransform = transform;
 
   return (
     <div ref={containerRef} style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -290,9 +345,9 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
         <div
           style={{
             position: 'absolute',
-            left: offsetX + (hoveredNode.x + hoveredNode.width + 15) * scale,
-            top: offsetY + (hoveredNode.y - 10) * scale,
-            background: 'rgba(255, 255, 255, 0.05)',
+            left: tooltipTransform.offsetX + (hoveredNode.x + hoveredNode.width + 15) * tooltipTransform.scale,
+            top: tooltipTransform.offsetY + (hoveredNode.y - 10) * tooltipTransform.scale,
+            background: 'rgba(0, 0, 0, 0.6)',
             backdropFilter: 'blur(20px)',
             color: '#fff',
             border: '1px solid rgba(102, 126, 234, 0.3)',
@@ -300,9 +355,9 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
             padding: '12px 14px',
             pointerEvents: 'none',
             zIndex: 10,
-            minWidth: Math.max(180, 180 * scale),
-            maxWidth: Math.max(260, 260 * scale),
-            fontSize: Math.max(12, 12 * scale),
+            minWidth: Math.max(180, 180 * tooltipTransform.scale),
+            maxWidth: Math.max(260, 260 * tooltipTransform.scale),
+            fontSize: Math.max(12, 12 * tooltipTransform.scale),
             boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05)',
             lineHeight: 1.4,
           }}
@@ -311,16 +366,15 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
             fontWeight: '600', 
             marginBottom: 6, 
             color: '#667eea',
-            fontSize: Math.max(14, 14 * scale)
+            fontSize: Math.max(14, 14 * tooltipTransform.scale)
           }}>
-            {hoveredNode.node.label}
+            <MathText text={hoveredNode.node.id === data.id ? 'Start' : hoveredNode.node.label} />
           </div>
           <div style={{ 
             color: 'rgba(255, 255, 255, 0.8)',
-            fontSize: Math.max(12, 12 * scale)
+            fontSize: Math.max(12, 12 * tooltipTransform.scale)
           }}>
-            {hoveredNode.node.description?.slice(0, 200) || 'No description'}
-            {hoveredNode.node.description && hoveredNode.node.description.length > 200 && '...'}
+            <MathText text={(hoveredNode.node.description?.slice(0, 200) || 'No description') + (hoveredNode.node.description && hoveredNode.node.description.length > 200 ? '...' : '')} />
           </div>
         </div>
       )}

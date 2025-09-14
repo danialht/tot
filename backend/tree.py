@@ -8,6 +8,7 @@ import re
 import json
 import logging
 import asyncio
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union, Callable, AsyncIterator
@@ -138,6 +139,58 @@ class SubProblemNode:
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize node to dictionary for external access."""
+        # Short branch idea/title extraction helpers
+        def _extract_branch_idea_from_subproblem(text: str) -> Optional[str]:
+            try:
+                m = re.search(r"Assume/Idea:\s*(.+?)(?:\n|$)", text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    return m.group(1).strip()
+            except Exception:
+                pass
+            return None
+
+        incoming_idea_text = self.incoming_thought.text if self.incoming_thought else None
+        branch_idea: Optional[str] = incoming_idea_text or _extract_branch_idea_from_subproblem(self.state.subproblem_text)
+
+        # Build a concise branch title for UI consumption
+        def _truncate(s: Optional[str], n: int = 60) -> Optional[str]:
+            if not s:
+                return None
+            s = s.strip()
+            return s if len(s) <= n else s[:n - 1] + "…"
+
+        branch_title: Optional[str] = None
+        if self.depth == 0:
+            branch_title = _truncate(self.state.subproblem_text, 60)
+        else:
+            branch_title = _truncate(branch_idea or incoming_idea_text or self.state.subproblem_text, 60)
+
+        # Parse packaged solution/reasoning if available
+        solution_package = self.state.candidate_solution
+        solution_text: Optional[str] = None
+        reasoning_text: Optional[str] = None
+        try:
+            if solution_package:
+                sol_m = re.search(r"^\s*Solution:\s*(.+?)\s*(?:\n|$)", solution_package, re.IGNORECASE | re.MULTILINE)
+                if sol_m:
+                    solution_text = sol_m.group(1).strip()
+                rsn_m = re.search(r"\n\s*Reasoning:\s*(.+)\Z", solution_package, re.IGNORECASE | re.DOTALL)
+                if rsn_m:
+                    reasoning_text = rsn_m.group(1).strip()
+        except Exception:
+            pass
+
+        # Structured chain of thought
+        chain_of_thought_struct = [
+            {
+                "text": t.text,
+                "rationale": t.rationale,
+                "intent": t.intent,
+                "candidate": t.candidate
+            }
+            for t in self.state.scratchpad
+        ]
+
         return {
             "id": f"node_{id(self)}",
             "depth": self.depth,
@@ -151,10 +204,19 @@ class SubProblemNode:
                 }
                 for t in self.generated_thoughts
             ],
-            "incoming_thought_text": self.incoming_thought.text if self.incoming_thought else None,
+            "incoming_thought_text": incoming_idea_text,
             "children_count": len(self.children),
             "processing_status": self.processing_status,
             "terminal_status": self.terminal_status,
+            # New additive fields for richer UI (non-breaking)
+            "solution_package": solution_package,
+            "solution_text": solution_text,
+            "reasoning_text": reasoning_text,
+            "branch_idea": branch_idea,
+            "branch_title": branch_title,
+            "idea_text": incoming_idea_text,
+            "rationale": (self.incoming_thought.rationale if self.incoming_thought else None),
+            "chain_of_thought": chain_of_thought_struct,
             "children": [child.to_dict() for child in self.children]
         }
 
@@ -220,7 +282,7 @@ class SolverConfig:
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
     reasoning_effort: str = "low"
-    max_tokens: int = 2000
+    max_tokens: int = 20000
     candidate_selection_mode: str = "validation"  # "validation" | "synthesis"
 
     def __post_init__(self):
@@ -264,6 +326,87 @@ def deduplicate_thoughts(thoughts: List[Thought]) -> List[Thought]:
             unique_thoughts.append(thought)
     
     return unique_thoughts
+
+
+# ----------------------------------------------------------------------------
+# HTTP helpers with retry/backoff and concurrency limiting
+# ----------------------------------------------------------------------------
+
+# Global semaphore to limit concurrent Cerebras API requests
+_DEFAULT_MAX_CONCURRENCY =  int(os.getenv("CEREBRAS_MAX_CONCURRENCY", "3"))
+_CEREBRAS_SEMAPHORE = asyncio.Semaphore(_DEFAULT_MAX_CONCURRENCY)
+
+
+async def _parse_retry_after_seconds(retry_after_header: Optional[str]) -> Optional[float]:
+    """Parse Retry-After header to seconds, if possible."""
+    if not retry_after_header:
+        return None
+    try:
+        return float(retry_after_header.strip())
+    except Exception:
+        return None
+
+
+async def http_post_json_with_retries(
+    session: aiohttp.ClientSession,
+    url: str,
+    headers: Dict[str, str],
+    data: Dict[str, Any],
+    *,
+    timeout_total: int = 30,
+    max_attempts: int = 5,
+    backoff_base: float = 0.5,
+    backoff_factor: float = 2.0,
+    backoff_max: float = 20.0,
+    retry_statuses: tuple = (429, 500, 502, 503, 504),
+    log_context: str = ""
+) -> Dict[str, Any]:
+    """POST JSON with retries, exponential backoff, and a concurrency guard.
+
+    Retries on network errors, timeouts, and retryable HTTP statuses like 429/5xx.
+    Respects Retry-After header when present (seconds).
+    """
+    async with _CEREBRAS_SEMAPHORE:
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=timeout_total)
+                ) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    # Non-200
+                    error_text = await response.text()
+                    status = response.status
+                    retry_after_hdr = response.headers.get("Retry-After")
+                    logger.warning(f"    ❌ {log_context}HTTP {status} - {error_text[:500]}")
+                    if status in retry_statuses and attempt < max_attempts:
+                        parsed_retry_after = await _parse_retry_after_seconds(retry_after_hdr)
+                        base_sleep = min(backoff_max, backoff_base * (backoff_factor ** (attempt - 1)))
+                        jitter = random.uniform(0, base_sleep * 0.25)
+                        sleep_s = parsed_retry_after if parsed_retry_after is not None else base_sleep + jitter
+                        logger.info(f"    ⏳ {log_context}Retrying in {sleep_s:.2f}s (attempt {attempt}/{max_attempts})")
+                        await asyncio.sleep(max(0.05, sleep_s))
+                        continue
+                    # Non-retryable or exhausted
+                    raise RuntimeError(f"HTTP {status} - {error_text}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = e
+                if attempt < max_attempts:
+                    base_sleep = min(backoff_max, backoff_base * (backoff_factor ** (attempt - 1)))
+                    jitter = random.uniform(0, base_sleep * 0.25)
+                    sleep_s = base_sleep + jitter
+                    logger.info(f"    ⏳ {log_context}Transient error: {e}. Retrying in {sleep_s:.2f}s (attempt {attempt}/{max_attempts})")
+                    await asyncio.sleep(max(0.05, sleep_s))
+                    continue
+                raise
+        # If we exit loop without returning, raise last error if set
+        if last_error:
+            raise last_error
+        raise RuntimeError("Request failed after retries without specific error")
 
 
 # ============================================================================
@@ -419,39 +562,36 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         except Exception:
             pass
         
-        async with session.post(
+        result = await http_post_json_with_retries(
+            session,
             f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
-                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
-            
-            result = await response.json()
-            # Log raw JSON (truncated)
-            try:
-                raw_str = json.dumps(result)[:2000]
-                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
-                for line in raw_str.split('\n'):
-                    logger.info(f"    {line}")
-            except Exception:
-                pass
-            if "choices" not in result or not result["choices"]:
-                raise RuntimeError("No choices in Cerebras response")
-            
-            response_content = result["choices"][0]["message"]["content"]
-            
-            # Log the full response
-            logger.info(f"    📥 THOUGHTS:")
-            logger.info(f"    {'-'*50}")
-            for line in response_content.split('\n'):
+            headers,
+            data,
+            timeout_total=30,
+            max_attempts=max(1, int(self.config.max_retries) + 1),
+            log_context="generation: "
+        )
+        # Log raw JSON (truncated)
+        try:
+            raw_str = json.dumps(result)[:2000]
+            logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+            for line in raw_str.split('\n'):
                 logger.info(f"    {line}")
-            logger.info(f"    {'-'*50}")
-            
-            return response_content
+        except Exception:
+            pass
+        if "choices" not in result or not result["choices"]:
+            raise RuntimeError("No choices in Cerebras response")
+        
+        response_content = result["choices"][0]["message"]["content"]
+        
+        # Log the full response
+        logger.info(f"    📥 THOUGHTS:")
+        logger.info(f"    {'-'*50}")
+        for line in response_content.split('\n'):
+            logger.info(f"    {line}")
+        logger.info(f"    {'-'*50}")
+        
+        return response_content
     
     async def _call_cerebras_streaming(self, prompt: str) -> AsyncIterator[Thought]:
         """Make streaming API call to Cerebras."""
@@ -477,57 +617,84 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         except Exception:
             pass
         
-        async with session.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=aiohttp.ClientTimeout(total=60)
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
-                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
-            
-            collected_content = ""
-            async for line in response.content:
-                line_str = line.decode('utf-8').strip()
-                if not line_str or line_str == "data: [DONE]":
-                    continue
-                
-                if line_str.startswith("data: "):
-                    try:
-                        json_str = line_str[6:]  # Remove "data: " prefix
-                        chunk = json.loads(json_str)
+        # Implement streaming with initial retry loop to obtain a stream, handling 429/5xx
+        max_attempts = max(1, int(self.config.max_retries) + 1)
+        attempt = 1
+        while attempt <= max_attempts:
+            try:
+                async with _CEREBRAS_SEMAPHORE:
+                    async with session.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=headers,
+                        json=data,
+                        timeout=aiohttp.ClientTimeout(total=60)
+                    ) as response:
+                        if response.status != 200:
+                            error_text = await response.text()
+                            status = response.status
+                            logger.warning(f"    ❌ Cerebras non-200(stream): {status} - {error_text[:500]}")
+                            if status in (429, 500, 502, 503, 504) and attempt < max_attempts:
+                                retry_after_hdr = response.headers.get("Retry-After")
+                                parsed_retry_after = await _parse_retry_after_seconds(retry_after_hdr)
+                                base_sleep = min(20.0, 0.5 * (2.0 ** (attempt - 1)))
+                                jitter = random.uniform(0, base_sleep * 0.25)
+                                sleep_s = parsed_retry_after if parsed_retry_after is not None else base_sleep + jitter
+                                logger.info(f"    ⏳ streaming: Retrying in {sleep_s:.2f}s (attempt {attempt}/{max_attempts})")
+                                await asyncio.sleep(max(0.05, sleep_s))
+                                attempt += 1
+                                continue
+                            raise RuntimeError(f"Cerebras API error: {status} - {error_text}")
                         
-                        if "choices" in chunk and chunk["choices"]:
-                            delta = chunk["choices"][0].get("delta", {})
-                            # Append both content and reasoning tokens if present
-                            if "content" in delta:
-                                collected_content += delta["content"]
-                            if "reasoning" in delta:
-                                collected_content += delta["reasoning"]
-                    except json.JSONDecodeError:
-                        continue
-            
-            # After stream completion, log once and parse once
-            if collected_content.strip():
-                logger.info(f"    📥 THOUGHTS (stream final):")
-                logger.info(f"    {'-'*50}")
-                for line in collected_content.split('\n'):
-                    logger.info(f"    {line}")
-                logger.info(f"    {'-'*50}")
-                thoughts = self._parse_thoughts(collected_content)
-                for thought in thoughts:
-                    yield thought
-            else:
-                # Fallback: try non-streaming call if nothing was collected
-                try:
-                    response_text = await self._call_cerebras_async(prompt)
-                    thoughts = self._parse_thoughts(response_text)
-                    for thought in thoughts:
-                        yield thought
-                except Exception:
-                    return
+                        collected_content = ""
+                        async for line in response.content:
+                            line_str = line.decode('utf-8').strip()
+                            if not line_str or line_str == "data: [DONE]":
+                                continue
+                            
+                            if line_str.startswith("data: "):
+                                try:
+                                    json_str = line_str[6:]  # Remove "data: " prefix
+                                    chunk = json.loads(json_str)
+                                    
+                                    if "choices" in chunk and chunk["choices"]:
+                                        delta = chunk["choices"][0].get("delta", {})
+                                        # Append both content and reasoning tokens if present
+                                        if "content" in delta:
+                                            collected_content += delta["content"]
+                                        if "reasoning" in delta:
+                                            collected_content += delta["reasoning"]
+                                except json.JSONDecodeError:
+                                    continue
+                        # After stream completion, log once and parse once
+                        if collected_content.strip():
+                            logger.info(f"    📥 THOUGHTS (stream final):")
+                            logger.info(f"    {'-'*50}")
+                            for line in collected_content.split('\n'):
+                                logger.info(f"    {line}")
+                            logger.info(f"    {'-'*50}")
+                            thoughts = self._parse_thoughts(collected_content)
+                            for thought in thoughts:
+                                yield thought
+                        else:
+                            # Fallback: try non-streaming call if nothing was collected
+                            try:
+                                response_text = await self._call_cerebras_async(prompt)
+                                thoughts = self._parse_thoughts(response_text)
+                                for thought in thoughts:
+                                    yield thought
+                            except Exception:
+                                return
+                        return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if attempt < max_attempts:
+                    base_sleep = min(20.0, 0.5 * (2.0 ** (attempt - 1)))
+                    jitter = random.uniform(0, base_sleep * 0.25)
+                    sleep_s = base_sleep + jitter
+                    logger.info(f"    ⏳ streaming: Transient error {e}; retrying in {sleep_s:.2f}s (attempt {attempt}/{max_attempts})")
+                    await asyncio.sleep(max(0.05, sleep_s))
+                    attempt += 1
+                    continue
+                raise
     
     def _parse_thoughts(self, text: str) -> List[Thought]:
         """Parse thoughts from Cerebras response."""
@@ -827,42 +994,39 @@ class LLMIdeaValidator(IdeaValidator):
         except Exception:
             pass
         
-        async with session.post(
+        result = await http_post_json_with_retries(
+            session,
             f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
-                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
-            
-            result = await response.json()
-            # Log raw JSON (truncated)
-            try:
-                raw_str = json.dumps(result)[:2000]
-                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
-                for line in raw_str.split('\n'):
-                    logger.info(f"    {line}")
-            except Exception:
-                pass
-            if "choices" not in result or not result["choices"]:
-                raise RuntimeError("No choices in Cerebras response")
-            
-            choice0 = result["choices"][0]
-            # Robustly extract content across possible payload shapes
-            message = choice0.get("message") or {}
-            content = message.get("content")
-            if not content:
-                content = choice0.get("text")
-            if not content:
-                # Some providers may put partials under delta even in non-stream situations
-                delta = choice0.get("delta") or {}
-                content = delta.get("content")
-            if not content:
-                raise KeyError("content")
-            return content
+            headers,
+            data,
+            timeout_total=30,
+            max_attempts=max(1, int(self.config.max_retries) + 1),
+            log_context="idea validation: "
+        )
+        # Log raw JSON (truncated)
+        try:
+            raw_str = json.dumps(result)[:2000]
+            logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+            for line in raw_str.split('\n'):
+                logger.info(f"    {line}")
+        except Exception:
+            pass
+        if "choices" not in result or not result["choices"]:
+            raise RuntimeError("No choices in Cerebras response")
+        
+        choice0 = result["choices"][0]
+        # Robustly extract content across possible payload shapes
+        message = choice0.get("message") or {}
+        content = message.get("content")
+        if not content:
+            content = choice0.get("text")
+        if not content:
+            # Some providers may put partials under delta even in non-stream situations
+            delta = choice0.get("delta") or {}
+            content = delta.get("content")
+        if not content:
+            raise KeyError("content")
+        return content
     
     def _parse_validation_score(self, text: str) -> float:
         """Parse validation score from response."""
@@ -975,40 +1139,37 @@ class LLMSolutionValidator(SolutionValidator):
         except Exception:
             pass
         
-        async with session.post(
+        result = await http_post_json_with_retries(
+            session,
             f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
-                raise RuntimeError(f"Cerebras API error: {response.status} - {error_text}")
-            
-            result = await response.json()
-            # Log raw JSON (truncated)
-            try:
-                raw_str = json.dumps(result)[:2000]
-                logger.info("    🧾 RAW RESPONSE JSON (truncated):")
-                for line in raw_str.split('\n'):
-                    logger.info(f"    {line}")
-            except Exception:
-                pass
-            if "choices" not in result or not result["choices"]:
-                raise RuntimeError("No choices in Cerebras response")
-            
-            choice0 = result["choices"][0]
-            message = choice0.get("message") or {}
-            content = message.get("content")
-            if not content:
-                content = choice0.get("text")
-            if not content:
-                delta = choice0.get("delta") or {}
-                content = delta.get("content")
-            if not content:
-                raise KeyError("content")
-            return content
+            headers,
+            data,
+            timeout_total=30,
+            max_attempts=max(1, int(self.config.max_retries) + 1),
+            log_context="solution validation: "
+        )
+        # Log raw JSON (truncated)
+        try:
+            raw_str = json.dumps(result)[:2000]
+            logger.info("    🧾 RAW RESPONSE JSON (truncated):")
+            for line in raw_str.split('\n'):
+                logger.info(f"    {line}")
+        except Exception:
+            pass
+        if "choices" not in result or not result["choices"]:
+            raise RuntimeError("No choices in Cerebras response")
+        
+        choice0 = result["choices"][0]
+        message = choice0.get("message") or {}
+        content = message.get("content")
+        if not content:
+            content = choice0.get("text")
+        if not content:
+            delta = choice0.get("delta") or {}
+            content = delta.get("content")
+        if not content:
+            raise KeyError("content")
+        return content
     
     def _parse_correctness(self, text: str) -> bool:
         """Parse correctness from validation response."""
@@ -1469,7 +1630,7 @@ class TreeOfThoughtSolver:
                 logger.info(f"    {line}")
             logger.info(f"    {'-'*50}")
 
-            # Reuse ProposeThoughtGenerator HTTP logic via a minimal inline call
+            # Reuse ProposeThoughtGenerator HTTP logic with retries
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self._synth_api_key}", "Content-Type": "application/json"}
                 data = {
@@ -1479,15 +1640,18 @@ class TreeOfThoughtSolver:
                     "max_tokens": self.config.max_tokens
                 }
                 logger.info("    🌐 POST /chat/completions (synthesis)")
-                async with session.post(f"{self._synth_base_url}/chat/completions", headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.warning(f"    ❌ Cerebras non-200: {response.status} - {error_text[:500]}")
-                        return None
-                    result = await response.json()
-                    content = result.get("choices", [{}])[0].get("message", {}).get("content")
-                    if not content:
-                        return None
+                result = await http_post_json_with_retries(
+                    session,
+                    f"{self._synth_base_url}/chat/completions",
+                    headers,
+                    data,
+                    timeout_total=30,
+                    max_attempts=max(1, int(self.config.max_retries) + 1),
+                    log_context="synthesis: "
+                )
+                content = result.get("choices", [{}])[0].get("message", {}).get("content")
+                if not content:
+                    return None
 
             # Log synthesis output
             logger.info(f"    📥 SYNTHESIS OUTPUT:")
@@ -1530,12 +1694,16 @@ class TreeOfThoughtSolver:
                     "temperature": self.config.temperature,
                     "max_tokens": self.config.max_tokens
                 }
-                async with session.post(f"{self._synth_base_url}/chat/completions", headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status != 200:
-                        _ = await response.text()
-                        return 0.0
-                    result = await response.json()
-                    content = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
+                result = await http_post_json_with_retries(
+                    session,
+                    f"{self._synth_base_url}/chat/completions",
+                    headers,
+                    data,
+                    timeout_total=30,
+                    max_attempts=max(1, int(self.config.max_retries) + 1),
+                    log_context="leaf validation: "
+                )
+                content = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
             # Log the validation output
             logger.info("    📥 VALIDATION OUTPUT:")
             logger.info(f"    {'-'*50}")
@@ -1764,7 +1932,7 @@ async def main():
     PROBLEM5 = "What you might make to express an emotion; what you need to do with your problems to defeat them? Clue: 4 letter word with the last letter being e"
     PROBLEM6 = "What you might put out to ascertain where someone’s at? Clue: *E**E*"
     PROBLEM7 = "By sounding it out, and counting with your fingers, the answer will come. Clue: *A**U"
-    problem = PROBLEM1
+    problem = PROBLEM3
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     

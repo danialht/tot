@@ -219,8 +219,8 @@ class SolverConfig:
     temperature: float = 0.7
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
-    reasoning_effort: str = "low"
-    max_tokens: int = 5000
+    reasoning_effort: str = "high"
+    max_tokens: int = 20000
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -1228,7 +1228,8 @@ class TreeOfThoughtSolver:
         # Decide mode and expected branching per fixed topology
         if node.depth < 2:
             mode = "idea"
-            required_branches = 2 if node.depth == 0 else 2
+            
+            required_branches = 3 if node.depth == 0 else 2
             thoughts = await self.thought_generator.generate(
                 node.state,
                 None,
@@ -1269,21 +1270,11 @@ class TreeOfThoughtSolver:
         node.generated_thoughts = thoughts.copy()
         logger.info(f"{indent}💭 Generated {len(thoughts)} thoughts")
         
-        # Score thoughts for possible tie-breaks
+        # Score thoughts (no external validation; neutral scores)
         scored_thoughts: List[tuple] = []
         for t in thoughts:
-            if mode == "solve":
-                # For solutions, skip idea validation
-                node.thought_scores[t.text] = 0.0
-                scored_thoughts.append((t, 0.0))
-            else:
-                try:
-                    score = await self.idea_validator.evaluate(node.state, t)
-                except Exception as e:
-                    logger.warning(f"{indent}Idea evaluation failed: {e}")
-                    score = 0.0
-                node.thought_scores[t.text] = score
-                scored_thoughts.append((t, score))
+            node.thought_scores[t.text] = 0.0
+            scored_thoughts.append((t, 0.0))
         
         # Separate by mode
         if mode == "solve":
@@ -1349,18 +1340,17 @@ class TreeOfThoughtSolver:
                     parts.append("Insights:\n" + "\n".join(bullets))
             return "\n".join(parts).strip()
 
-        # Direct solutions proposed at this node
+        # Direct solutions proposed at this node (no validation)
         for t in direct_candidates:
             sol_text = t.candidate or ""
             reasoning_text = build_reasoning(t)
-            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text, reasoning_text)
             candidates.append({
                 "origin": "direct",
                 "idea_text": None,
                 "solution_text": sol_text,
                 "reasoning_text": reasoning_text,
-                "solved": eval_res["solved"],
-                "quality": eval_res.get("quality") or 0.0,
+                "solved": None,
+                "quality": 0.0,
                 "tie_score": node.thought_scores.get(t.text, 0.0)
             })
         
@@ -1370,14 +1360,13 @@ class TreeOfThoughtSolver:
             if not sol_text:
                 continue
             reasoning_text = child_info.get("reasoning_text")
-            eval_res = await self._evaluate_in_parent_context(parent_problem, sol_text, reasoning_text)
             candidates.append({
                 "origin": "child",
                 "idea_text": child_info["idea"].text,
                 "solution_text": sol_text,
                 "reasoning_text": reasoning_text,
-                "solved": eval_res["solved"],
-                "quality": eval_res.get("quality") or 0.0,
+                "solved": None,
+                "quality": 0.0,
                 "tie_score": float(child_info.get("idea_score") or 0.0)
             })
         
@@ -1399,12 +1388,7 @@ class TreeOfThoughtSolver:
                 logger.info(f"{indent}🏆 Synthesized candidate selected")
             else:
                 logger.warning(f"{indent}Synthesis failed to produce an answer; falling back")
-                if len(candidates) == 1:
-                    best_candidate = candidates[0]
-                else:
-                    # As ultimate fallback, pick the first solved or the first
-                    solved_first = next((c for c in candidates if c.get("solved")), None)
-                    best_candidate = solved_first or candidates[0]
+                best_candidate = candidates[0]
         else:
             logger.info(f"{indent}❌ No candidates produced at this node")
         
@@ -1685,7 +1669,14 @@ async def main():
     logger.info("="*60)
     
     # Test with the water molecule problem
-    problem = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass after turning it over.'
+    PROBLEM1 = "Add (normal) quotes to the make the following true in three different ways: \n\n Sam is flying to Europe is a sentence and is an expression."
+    PROBLEM2 = 'We fill a glass with water up to the brim. we turn it upsidedown. give an estimate for how many water molecules are in the glass.'
+    PROBLEM3 = "You have access to a 2sided dice, 3, 5... up to 41 (only the prime numbered ones). What is a strategy that strictly guarantees a 42 sided dice by rolling twice? One roll operation is picking 1 dice and rolling it once."
+    PROBLEM4 = "My pottery person made my mug wrong. The bottom is open and the top has been water-proof sealed. Can I still use the mug to hold water?"
+    PROBLEM5 = "What you might make to express an emotion; what you need to do with your problems to defeat them? Clue: 4 letter word with the last letter being e"
+    PROBLEM6 = "What you might put out to ascertain where someone’s at? Clue: *E**E*"
+    PROBLEM7 = "By sounding it out, and counting with your fingers, the answer will come. Clue: *A**U"
+    problem = PROBLEM7
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     

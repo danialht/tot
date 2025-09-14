@@ -355,9 +355,9 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
             padding: '12px 14px',
             pointerEvents: 'none',
             zIndex: 10,
-            minWidth: Math.max(180, 180 * tooltipTransform.scale),
-            maxWidth: Math.max(260, 260 * tooltipTransform.scale),
-            fontSize: Math.max(12, 12 * tooltipTransform.scale),
+            minWidth: 220,
+            maxWidth: 320,
+            fontSize: 12,
             boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05)',
             lineHeight: 1.4,
           }}
@@ -366,13 +366,13 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
             fontWeight: '600', 
             marginBottom: 6, 
             color: '#667eea',
-            fontSize: Math.max(14, 14 * tooltipTransform.scale)
+            fontSize: 14
           }}>
             <MathText text={hoveredNode.node.id === data.id ? 'Start' : hoveredNode.node.label} />
           </div>
           <div style={{ 
             color: 'rgba(255, 255, 255, 0.8)',
-            fontSize: Math.max(12, 12 * tooltipTransform.scale)
+            fontSize: 12
           }}>
             <MathText text={(hoveredNode.node.description?.slice(0, 200) || 'No description') + (hoveredNode.node.description && hoveredNode.node.description.length > 200 ? '...' : '')} />
           </div>

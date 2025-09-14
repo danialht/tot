@@ -3,7 +3,6 @@ import "./App.css";
 import Tree from "./Tree";
 import type { TreeNode } from "./Tree";
 import PopupWindow from "./PopupWindow";
-import MathText from "./MathText";
 
 const initialTree: TreeNode = {
   id: "Idea",
@@ -88,7 +87,6 @@ type PopupWindowProps = {
 };
 
 function App() {
-  const [messages, setMessages] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [lastUserPrompt, setLastUserPrompt] = useState<string>("");
   const [tree, setTree] = useState<TreeNode>(initialTree);
@@ -96,49 +94,47 @@ function App() {
   const [hasFirstPromptBeenAnswered, setHasFirstPromptBeenAnswered] = useState(false);
   const [isBotTyping, setIsBotTyping] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [effort, setEffort] = useState<'low' | 'medium' | 'high'>('medium');
   const ws = useRef<WebSocket | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [popupWindowProps, setPopupWindowProps] =
     useState<PopupWindowProps | null>(null);
+  const shownIdsRef = React.useRef<Set<string>>(new Set());
+  const [messages, setMessages] = useState<string[]>([]);
+  const [wsReady, setWsReady] = useState<boolean>(false);
+  const [reasoningSeconds, setReasoningSeconds] = useState<number>(0);
+  const reasoningStartRef = useRef<number | null>(null);
+  const [finalThoughtSeconds, setFinalThoughtSeconds] = useState<number | null>(null);
 
-  const scrollChatToBottom = () => {
-    if (messagesEndRef.current) {
-      // Use rAF to ensure DOM is updated before scrolling
-      requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({
-          behavior: "smooth",
-          block: "end",
-        });
-      });
-    }
-  };
+  // Chat logs removed; no scroll handling needed
 
-  async function animateTree(tree: TreeNode) {
-    // console.log('Animating tree', tree);
+  async function animateTreeIncremental(incoming: TreeNode) {
     const nodes: TreeNode[] = [];
-    function bfsAndShowNodes(tree: TreeNode) {
-        const queue: TreeNode[] = [tree];
-        while (queue.length > 0) {
-            const currentNode = queue.shift()!;
-            nodes.push(currentNode);
-            if (currentNode.children) {
-                queue.push(...currentNode.children);
-            }
-        }
+    const queue: TreeNode[] = [incoming];
+    while (queue.length) {
+      const n = queue.shift()!;
+      nodes.push(n);
+      if (n.children) queue.push(...n.children);
     }
-    bfsAndShowNodes(tree);
-    for (const node of nodes) {
-        node.hidden = true;
+    const newNodes: TreeNode[] = [];
+    for (const n of nodes) {
+      if (shownIdsRef.current.has(n.id)) {
+        n.hidden = false;
+      } else {
+        n.hidden = true;
+        newNodes.push(n);
+      }
     }
-    for(const node of nodes) {
-        node.hidden = false;
-        setTree({ ...tree });
-        console.log('Showing node', node);
-        const delay = Math.floor(Math.random() * (500 - 100 + 1)) + 100;
-        await new Promise((resolve) => setTimeout(resolve, delay));
+    setTree({ ...incoming });
+    for (const n of newNodes) {
+      n.hidden = false;
+      setTree({ ...incoming });
+      shownIdsRef.current.add(n.id);
+      const delay = Math.floor(Math.random() * (500 - 100 + 1)) + 100;
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
-}
+  }
 
   React.useEffect(() => {
     if (inputRef.current) {
@@ -156,39 +152,118 @@ function App() {
     }
   }, [theme]);
 
-  // Always scroll to bottom when messages change
   React.useEffect(() => {
-    scrollChatToBottom();
-  }, [messages]);
+    if (isBotTyping) {
+      const start = Date.now();
+      reasoningStartRef.current = start;
+      setFinalThoughtSeconds(null);
+      setReasoningSeconds(0);
+      const id = setInterval(() => {
+        setReasoningSeconds(Math.floor((Date.now() - start) / 1000));
+      }, 1000);
+      return () => clearInterval(id);
+    } else {
+      setReasoningSeconds(0);
+      reasoningStartRef.current = null;
+    }
+  }, [isBotTyping]);
 
   const connect = () => {
     if (ws.current) return;
-    ws.current = new WebSocket("ws://localhost:8000/ws");
-    ws.current.onmessage = (event: MessageEvent) => {
-        const obj = JSON.parse(event.data);
-        if (!hasFirstPromptBeenAnswered) setHasFirstPromptBeenAnswered(true);
-        setIsBotTyping(false);
-        setMessages((msgs) => [...msgs, "tot: " + obj["output"]]);
-        const tree = makeTreeFromData(obj.tree, 0);
-        // console.log('Received tree from server:', tree);    
-        animateTree(tree);
+    const url = `ws://localhost:8000/ws?effort=${encodeURIComponent(effort)}`;
+    ws.current = new WebSocket(url);
+    setWsReady(false);
+    ws.current.onopen = () => {
+      setWsReady(true);
+      console.log("WS open");
     };
-    ws.current.onclose = () => {
+    ws.current.onmessage = (event: MessageEvent) => {
+      const obj = JSON.parse(event.data);
+      if (!hasFirstPromptBeenAnswered) setHasFirstPromptBeenAnswered(true);
+      // Interim updates: obj.output may be empty; final has text
+      const tree = makeTreeFromData(obj.tree, 0);
+      animateTreeIncremental(tree);
+      if (obj.output && String(obj.output).trim()) {
+        const secs = reasoningStartRef.current ? Math.max(0, Math.round((Date.now() - reasoningStartRef.current) / 1000)) : reasoningSeconds;
+        setIsBotTyping(false);
+        setFinalThoughtSeconds(secs);
+        setMessages((msgs) => [...msgs, `tot: ${obj.output}`]);
+      }
+    };
+    ws.current.onclose = (ev: CloseEvent) => {
+      console.warn("WS closed", { code: ev.code, reason: ev.reason });
       ws.current = null;
+      setWsReady(false);
+    };
+    ws.current.onerror = (ev: Event) => {
+      console.error("WS error", ev);
     };
   };
 
+  // Reconnect when effort changes
+  React.useEffect(() => {
+    if (ws.current) {
+      try { ws.current.close(); } catch {}
+      ws.current = null;
+    }
+    connect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effort]);
+  
   connect();
 
   const sendMessage = () => {
-    if (ws.current && input) {
-      ws.current.send(input);
-      setMessages((msgs) => [...msgs, "You: " + input]);
-      setLastUserPrompt(input);
-      setInput("");
-      if (!hasSentFirstMessage) setHasSentFirstMessage(true);
-      setIsBotTyping(true);
-    }
+    if (!input) return;
+    const text = input;
+    setMessages((msgs) => [...msgs, `You: ${text}`]);
+    setLastUserPrompt(text);
+    setInput("");
+    shownIdsRef.current = new Set();
+    if (!hasSentFirstMessage) setHasSentFirstMessage(true);
+    setIsBotTyping(true);
+    setFinalThoughtSeconds(null);
+
+    const ensureConnectedAndSend = () => {
+      const socket = ws.current;
+      if (!socket) {
+        console.warn("WS not connected, reconnecting then sending...");
+        connect();
+        const trySend = () => {
+          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            try { ws.current.send(text); } catch (e) { console.error("WS send error", e); }
+          } else {
+            setTimeout(trySend, 50);
+          }
+        };
+        trySend();
+        return;
+      }
+      if (socket.readyState === WebSocket.OPEN) {
+        try { socket.send(text); } catch (e) { console.error("WS send error", e); }
+      } else if (socket.readyState === WebSocket.CONNECTING) {
+        console.log("WS connecting, will send on open");
+        const onOpen = () => {
+          try { ws.current?.send(text); } catch (e) { console.error("WS send error", e); }
+          ws.current?.removeEventListener('open', onOpen);
+        };
+        socket.addEventListener('open', onOpen);
+      } else {
+        console.warn("WS not open (state=", socket.readyState, "), reconnecting then sending...");
+        try { socket.close(); } catch {}
+        ws.current = null;
+        connect();
+        const trySend = () => {
+          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            try { ws.current.send(text); } catch (e) { console.error("WS send error", e); }
+          } else {
+            setTimeout(trySend, 50);
+          }
+        };
+        trySend();
+      }
+    };
+
+    ensureConnectedAndSend();
   };
 
   return (
@@ -222,21 +297,44 @@ function App() {
               className="messages"
               style={{ display: messages.length === 0 ? "none" : undefined }}
             >
-              {messages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={"message " + (i % 2 === 0 ? "user" : "bot")}
-                >
-                  <MathText text={msg} />
-                </div>
-              ))}
-              {isBotTyping && (
-                <div className="message bot typingIndicator" aria-live="polite">
-                  <span className="typingDot" />
-                  <span className="typingDot" />
-                  <span className="typingDot" />
-                </div>
-              )}
+              {(() => {
+                const lastUserIdx = (() => {
+                  let idx = -1;
+                  for (let i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i].startsWith('You: ')) { idx = i; break; }
+                  }
+                  return idx;
+                })();
+                const before = messages.slice(0, lastUserIdx + 1);
+                const after = messages.slice(lastUserIdx + 1);
+                return (
+                  <>
+                    {before.map((msg, i) => (
+                      <div key={`b-${i}`} className={"message " + ( (i % 2 === 0) ? "user" : "bot")}>{msg}</div>
+                    ))}
+                    {isBotTyping && (
+                      <>
+                        <div className="message bot" aria-live="polite" style={{ opacity: 0.85 }}>
+                          {`Reasoning on ${effort === 'medium' ? 'med' : effort} for ${reasoningSeconds}s`}
+                        </div>
+                        <div className="message bot typingIndicator" aria-live="polite">
+                          <span className="typingDot" />
+                          <span className="typingDot" />
+                          <span className="typingDot" />
+                        </div>
+                      </>
+                    )}
+                    {!isBotTyping && finalThoughtSeconds !== null && (
+                      <div className="message bot" aria-live="polite" style={{ opacity: 0.85 }}>
+                        {`Thought for ${finalThoughtSeconds}s`}
+                      </div>
+                    )}
+                    {after.map((msg, j) => (
+                      <div key={`a-${j}`} className={"message " + ( ((before.length + j) % 2 === 0) ? "user" : "bot")}>{msg}</div>
+                    ))}
+                  </>
+                );
+              })()}
               <div ref={messagesEndRef} />
             </div>
             {hasSentFirstMessage && !hasFirstPromptBeenAnswered && (
@@ -270,21 +368,6 @@ function App() {
                           lastUserPrompt.length
                         );
                       }, 0);
-                    } else {
-                      // Fallback: search messages for last user prompt
-                      const last = [...messages]
-                        .reverse()
-                        .find((m) => m.startsWith("You: "));
-                      if (last) {
-                        const prompt = last.slice(5);
-                        setInput(prompt);
-                        setTimeout(() => {
-                          inputRef.current?.setSelectionRange(
-                            prompt.length,
-                            prompt.length
-                          );
-                        }, 0);
-                      }
                     }
                     e.preventDefault();
                   } else if (
@@ -299,15 +382,18 @@ function App() {
               <div className="buttonDropdownStack">
                 <button
                   onClick={sendMessage}
-                  disabled={!ws.current || !input}
+                  disabled={(!wsReady) || !input}
                   className="button"
                 >
                   Send
                 </button>
-                <select className="dropdown">
-                  <option value="option1">Normal</option>
-                  <option value="option2">Swift</option>
-                  <option value="option3">Genius</option>
+                <select className="dropdown" value={effort} onChange={(e) => {
+                  const val = e.target.value as 'low' | 'medium' | 'high';
+                  setEffort(val);
+                }}>
+                  <option value="low">Swift</option>
+                  <option value="medium">Normal</option>
+                  <option value="high">Genius</option>
                 </select>
               </div>
             </div>
@@ -329,21 +415,44 @@ function App() {
                     className="messages"
                     style={{ display: messages.length === 0 ? "none" : undefined }}
                   >
-                    {messages.map((msg, i) => (
-                      <div
-                        key={i}
-                        className={"message " + (i % 2 === 0 ? "user" : "bot")}
-                      >
-                        <MathText text={msg} />
-                      </div>
-                    ))}
-                    {isBotTyping && (
-                      <div className="message bot typingIndicator" aria-live="polite">
-                        <span className="typingDot" />
-                        <span className="typingDot" />
-                        <span className="typingDot" />
-                      </div>
-                    )}
+                    {(() => {
+                      const lastUserIdx = (() => {
+                        let idx = -1;
+                        for (let i = messages.length - 1; i >= 0; i--) {
+                          if (messages[i].startsWith('You: ')) { idx = i; break; }
+                        }
+                        return idx;
+                      })();
+                      const before = messages.slice(0, lastUserIdx + 1);
+                      const after = messages.slice(lastUserIdx + 1);
+                      return (
+                        <>
+                          {before.map((msg, i) => (
+                            <div key={`b2-${i}`} className={"message " + ( (i % 2 === 0) ? "user" : "bot")}>{msg}</div>
+                          ))}
+                          {isBotTyping && (
+                            <>
+                              <div className="message bot" aria-live="polite" style={{ opacity: 0.85 }}>
+                                {`Reasoning on ${effort === 'medium' ? 'med' : effort} for ${reasoningSeconds}s`}
+                              </div>
+                              <div className="message bot typingIndicator" aria-live="polite">
+                                <span className="typingDot" />
+                                <span className="typingDot" />
+                                <span className="typingDot" />
+                              </div>
+                            </>
+                          )}
+                          {!isBotTyping && finalThoughtSeconds !== null && (
+                            <div className="message bot" aria-live="polite" style={{ opacity: 0.85 }}>
+                              {`Thought for ${finalThoughtSeconds}s`}
+                            </div>
+                          )}
+                          {after.map((msg, j) => (
+                            <div key={`a2-${j}`} className={"message " + ( ((before.length + j) % 2 === 0) ? "user" : "bot")}>{msg}</div>
+                          ))}
+                        </>
+                      );
+                    })()}
                     <div ref={messagesEndRef} />
                   </div>
                   <div className="inputRow">
@@ -369,19 +478,7 @@ function App() {
                               );
                             }, 0);
                           } else {
-                            const last = [...messages]
-                              .reverse()
-                              .find((m) => m.startsWith("You: "));
-                            if (last) {
-                              const prompt = last.slice(5);
-                              setInput(prompt);
-                              setTimeout(() => {
-                                inputRef.current?.setSelectionRange(
-                                  prompt.length,
-                                  prompt.length
-                                );
-                              }, 0);
-                            }
+                            // Fallback removed (no chat history)
                           }
                           e.preventDefault();
                         } else if (
@@ -396,15 +493,18 @@ function App() {
                     <div className="buttonDropdownStack">
                       <button
                         onClick={sendMessage}
-                        disabled={!ws.current || !input}
+                        disabled={(!wsReady) || !input}
                         className="button"
                       >
                         Send
                       </button>
-                      <select className="dropdown">
-                        <option value="option1">Normal</option>
-                        <option value="option2">Swift</option>
-                        <option value="option3">Genius</option>
+                      <select className="dropdown" value={effort} onChange={(e) => {
+                        const val = e.target.value as 'low' | 'medium' | 'high';
+                        setEffort(val);
+                      }}>
+                        <option value="low">Swift</option>
+                        <option value="medium">Normal</option>
+                        <option value="high">Genius</option>
                       </select>
                     </div>
                   </div>

@@ -282,7 +282,7 @@ class SolverConfig:
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
     reasoning_effort: str = "low"
-    max_tokens: int = 20000
+    max_tokens: int = 60000
     candidate_selection_mode: str = "validation"  # "validation" | "synthesis"
 
     def __post_init__(self):
@@ -553,12 +553,13 @@ class ProposeThoughtGenerator(ThoughtGenerator):
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens
+            "max_tokens": self.config.max_tokens,
+            "reasoning_effort": self.config.reasoning_effort
         }
         # Log request (without API key)
         try:
             logger.info("    🌐 POST /chat/completions (generation)")
-            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False, reasoning_effort={self.config.reasoning_effort}")
         except Exception:
             pass
         
@@ -609,11 +610,12 @@ class ProposeThoughtGenerator(ThoughtGenerator):
             ],
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
-            "stream": True
+            "stream": True,
+            "reasoning_effort": self.config.reasoning_effort
         }
         try:
             logger.info("    🌐 POST /chat/completions (generation streaming)")
-            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=True")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=True, reasoning_effort={self.config.reasoning_effort}")
         except Exception:
             pass
         
@@ -985,12 +987,13 @@ class LLMIdeaValidator(IdeaValidator):
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens
+            "max_tokens": self.config.max_tokens,
+            "reasoning_effort": self.config.reasoning_effort
         }
         # Log request (without API key)
         try:
             logger.info("    🌐 POST /chat/completions (idea validation)")
-            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False, reasoning_effort={self.config.reasoning_effort}")
         except Exception:
             pass
         
@@ -1130,12 +1133,13 @@ class LLMSolutionValidator(SolutionValidator):
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens
+            "max_tokens": self.config.max_tokens,
+            "reasoning_effort": self.config.reasoning_effort
         }
         # Log request (without API key)
         try:
             logger.info("    🌐 POST /chat/completions (solution validation)")
-            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False")
+            logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False, reasoning_effort={self.config.reasoning_effort}")
         except Exception:
             pass
         
@@ -1637,9 +1641,11 @@ class TreeOfThoughtSolver:
                     "model": self.config.cerebras_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": self.config.temperature,
-                    "max_tokens": self.config.max_tokens
+                    "max_tokens": self.config.max_tokens,
+                    "reasoning_effort": self.config.reasoning_effort
                 }
                 logger.info("    🌐 POST /chat/completions (synthesis)")
+                logger.info(f"    Request params: model={data['model']}, temperature={data['temperature']}, max_tokens={data['max_tokens']}, stream=False, reasoning_effort={self.config.reasoning_effort}")
                 result = await http_post_json_with_retries(
                     session,
                     f"{self._synth_base_url}/chat/completions",
@@ -1692,7 +1698,8 @@ class TreeOfThoughtSolver:
                     "model": self.config.cerebras_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": self.config.temperature,
-                    "max_tokens": self.config.max_tokens
+                    "max_tokens": self.config.max_tokens,
+                    "reasoning_effort": self.config.reasoning_effort
                 }
                 result = await http_post_json_with_retries(
                     session,
@@ -1930,7 +1937,7 @@ async def main():
     PROBLEM3 = "You have access to a 2sided dice, 3, 5... up to 41 (only the prime numbered ones). What is a strategy that strictly guarantees a 42 sided dice by rolling twice? One roll operation is picking 1 dice and rolling it once."
     PROBLEM4 = "My pottery person made my mug wrong. The bottom is open and the top has been water-proof sealed. Can I still use the mug to hold water?"
     PROBLEM5 = "What you might make to express an emotion; what you need to do with your problems to defeat them? Clue: 4 letter word with the last letter being e"
-    PROBLEM6 = "What you might put out to ascertain where someone’s at? Clue: *E**E*"
+    PROBLEM6 = "What you might put out to ascertain where someone's at? Clue: *E**E*"
     PROBLEM7 = "By sounding it out, and counting with your fingers, the answer will come. Clue: *A**U"
     problem = PROBLEM3
     logger.info(f"Problem: {problem}")

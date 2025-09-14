@@ -14,20 +14,26 @@ interface DrawnNode {
 function getTreeLayout(root: TreeNode): DrawnNode[] {
   const nodes: DrawnNode[] = [];
   let x = 0;
-  const CHAR_WIDTH = 18; // px per character
   function traverse(node: TreeNode, depth: number): number {
-    const labelLength = node.label.length;
-    const nodeWidth = 50;// Math.max(48, labelLength * CHAR_WIDTH);
+    const nodeWidth = 50;
     const startX = x;
     let childCount = 0;
     if (node.children && node.children.length > 0) {
       for (const child of node.children) {
+        if(child.hidden) continue;
         traverse(child, depth + 1);
         childCount++;
+      }
+      if(childCount === 0) {
+        // Act as there is not child
+        nodes.push({ node, x, y: depth * VERTICAL_GAP, width: nodeWidth, height: NODE_HEIGHT });
+        x += nodeWidth + HORIZONTAL_GAP;
+        return startX;
       }
       // Center parent above its children
       const firstChild = nodes[nodes.length - childCount];
       const lastChild = nodes[nodes.length - 1];
+      console.log('First child:', firstChild, 'Last child:', lastChild, 'childcount', childCount);
       const centerX = (firstChild.x + lastChild.x) / 2;
       nodes.push({ node, x: centerX, y: depth * VERTICAL_GAP, width: nodeWidth, height: NODE_HEIGHT });
     } else {
@@ -46,6 +52,7 @@ export interface TreeNode {
   label: string;
   description?: string;
   children?: TreeNode[];
+  hidden?: boolean;
 }
 
 interface TreeProps {
@@ -79,9 +86,21 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
             ctx.beginPath();
             ctx.moveTo(node.x + node.width / 2, node.y + NODE_HEIGHT);
             ctx.lineTo(childNode.x + childNode.width / 2, childNode.y);
-            ctx.strokeStyle = 'green';
-            ctx.lineWidth = 2;
+            
+            // Create gradient for connector
+            const gradient = ctx.createLinearGradient(
+              node.x + node.width / 2, node.y + NODE_HEIGHT,
+              childNode.x + childNode.width / 2, childNode.y
+            );
+            gradient.addColorStop(0, 'rgba(102, 126, 234, 0.8)');
+            gradient.addColorStop(1, 'rgba(118, 75, 162, 0.8)');
+            
+            ctx.strokeStyle = gradient;
+            ctx.lineWidth = 3;
+            ctx.shadowColor = 'rgba(102, 126, 234, 0.3)';
+            ctx.shadowBlur = 4;
             ctx.stroke();
+            ctx.shadowBlur = 0;
           }
         }
       }
@@ -89,18 +108,52 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
 
     // Draw nodes
     for (const node of nodes) {
+      const isHovered = hoveredNode && hoveredNode.node.id === node.node.id;
+      
+      // Create gradient for node background
+      const nodeGradient = ctx.createLinearGradient(
+        node.x, node.y,
+        node.x, node.y + NODE_HEIGHT
+      );
+      
+      if (isHovered) {
+        nodeGradient.addColorStop(0, 'rgba(102, 126, 234, 0.2)');
+        nodeGradient.addColorStop(1, 'rgba(118, 75, 162, 0.2)');
+      } else {
+        nodeGradient.addColorStop(0, 'rgba(255, 255, 255, 0.05)');
+        nodeGradient.addColorStop(1, 'rgba(255, 255, 255, 0.02)');
+      }
+      
+      // Draw node background with rounded corners
       ctx.beginPath();
-      ctx.rect(node.x, node.y, node.width, NODE_HEIGHT);
-      ctx.fillStyle = hoveredNode && hoveredNode.node.id === node.node.id ? '#003300' : '#111';
-      ctx.strokeStyle = 'green';
-      ctx.lineWidth = 2;
+      ctx.roundRect(node.x, node.y, node.width, NODE_HEIGHT, 12);
+      ctx.fillStyle = nodeGradient;
       ctx.fill();
+      
+      // Draw node border
+      ctx.strokeStyle = isHovered ? 'rgba(102, 126, 234, 0.6)' : 'rgba(102, 126, 234, 0.3)';
+      ctx.lineWidth = isHovered ? 2 : 1;
       ctx.stroke();
-      ctx.fillStyle = 'green';
-      ctx.font = 'bold 16px Arial';
+      
+      // Add shadow effect
+      if (isHovered) {
+        ctx.shadowColor = 'rgba(102, 126, 234, 0.3)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 2;
+      }
+      
+      // Draw text
+      ctx.fillStyle = '#fff';
+      ctx.font = '600 14px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(node.node.label, node.x + node.width / 2, node.y + NODE_HEIGHT / 2);
+      
+      // Reset shadow
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
     }
   }, [data, hoveredNode]);
 
@@ -176,22 +229,38 @@ const Tree: React.FC<TreeProps> = ({ data, onNodeClick }) => {
         <div
           style={{
             position: 'absolute',
-            left: hoveredNode.x + hoveredNode.width + 10,
-            top: hoveredNode.y,
-            background: '#222',
-            color: 'green',
-            border: '1px solid green',
-            borderRadius: 6,
-            padding: '8px 12px',
+            left: hoveredNode.x + hoveredNode.width + 15,
+            top: hoveredNode.y - 10,
+            background: 'rgba(255, 255, 255, 0.05)',
+            backdropFilter: 'blur(20px)',
+            color: '#fff',
+            border: '1px solid rgba(102, 126, 234, 0.3)',
+            borderRadius: 12,
+            padding: '16px 20px',
             pointerEvents: 'none',
             zIndex: 10,
-            minWidth: 120,
+            minWidth: 200,
+            maxWidth: 300,
             fontSize: 14,
-            boxShadow: '0 2px 8px #000a',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+            lineHeight: 1.4,
           }}
         >
-          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{hoveredNode.node.label}</div>
-          <div>{hoveredNode.node.description.slice(0, 1000) || 'No description'}</div>
+          <div style={{ 
+            fontWeight: '600', 
+            marginBottom: 8, 
+            color: '#667eea',
+            fontSize: 16 
+          }}>
+            {hoveredNode.node.label}
+          </div>
+          <div style={{ 
+            color: 'rgba(255, 255, 255, 0.8)',
+            fontSize: 13 
+          }}>
+            {hoveredNode.node.description?.slice(0, 200) || 'No description'}
+            {hoveredNode.node.description && hoveredNode.node.description.length > 200 && '...'}
+          </div>
         </div>
       )}
     </div>

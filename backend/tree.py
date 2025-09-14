@@ -216,7 +216,7 @@ class SolverConfig:
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
     reasoning_effort: str = "low"
-    max_tokens: int = 2000
+    max_tokens: int = 5000
 
     def __post_init__(self):
         """Validate configuration values."""

@@ -9,7 +9,7 @@ from tree import SolverConfig, create_default_solver
 
 from dotenv import load_dotenv
 load_dotenv()
-TEST_MODE = False
+TEST_MODE = True
 app = FastAPI()
 
 # Allow CORS for local frontend
@@ -32,6 +32,7 @@ class Node:
         self.terminal_status = terminal_status
         self.children = []
     
+
     def addChild(self, child_node):
         self.children.append(child_node)
 
@@ -46,30 +47,43 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             if TEST_MODE:
-                await websocket.send_text(json.dumps({'output': 'Test mode: not solving'}))
+                test_leaf2 = {
+                    'id': 'test_leaf_lskjdf',
+                    'chain_of_thought_text': 'some chain of thought',
+                    'description': 'This is a test leaf node',
+                    'subproblem': 'A subproblem',
+                    'children': []
+                }
+                test_leaf = {
+                    'id': 'test_leaf',
+                    'chain_of_thought_text': 'some chain of thought',
+                    'description': 'This is a test leaf node',
+                    'subproblem': 'A subproblem',
+                    'children': []
+                }
+                test_node = {
+                    'id': 'test_node',
+                    'chain_of_thought_text': 'some chain of thought',
+                    'description': 'This is a test node',
+                    'subproblem': 'A subproblem',
+                    'children': [test_leaf, test_leaf2]
+                }
+                await websocket.send_text(
+                    json.dumps({'output': 'Test mode: not solving',
+                                  'tree': {'id': 'test_root', 'subproblem': 'some subproblem', 'chain_of_thought_text': 'some chain of thought', 'description': 'This is a test root node', 'children': [test_node]}})
+                )
                 continue
-            output = await solver.solve(data, log=False)
-            keys=['id', 'subproblem', 'chain_of_thought_text', 'incoming_thoughts_texts', 'children_count', 'processing_status', 'terminal_status']
-            # print(solver.root_node.to_dict())
+            
+            output = await solver.solve(data, log=True)
+            
             if not solver.root_node:
                 await websocket.send_text(f"Solver not initialized")
                 continue
-            # print(solver.root_node.to_dict().keys())
-            # print(json.dumps(solver.root_node.to_dict()))
-            # node = Node(id=solver.root_node.to_dict()['id'],
-            #             subproblem=solver.root_node.to_dict()['subproblem'],
-            #             chain_of_thought_text=solver.root_node.to_dict()['chain_of_thought_text'],
-            #             incoming_thoughts_texts=solver.root_node.to_dict()['incoming_thoughts_texts'],
-            #             children_count=solver.root_node.to_dict()['children_count'],
-            #             processing_status=solver.root_node.to_dict()['processing_status'],
-            #             terminal_status=solver.root_node.to_dict()['terminal_status'])
-            # breakpoint()
-            print('fuk')
-            print('nothing:?', json.dumps(solver.root_node.to_dict()))
+            
             await websocket.send_text(
                 json.dumps(
                     {
-                        'output': 'Output',
+                        'output': f'{output.final_solution_text}',
                         'tree': solver.root_node.to_dict()
                     }
                 )

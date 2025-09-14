@@ -9,10 +9,10 @@ const initialTree: TreeNode = {
   label: "Idea",
   description: "This is where a great journey begins.",
   children: [
-    { id: '1', label: 'Child 1', description: 'First child.', hidden: false, children: [] },
-    { id: '2', label: 'Child 2', description: 'Second child.', hidden: false, children: [
-      { id: '2-1', label: 'Subchild 2-1', description: 'First subchild.', hidden: false, children: [] },
-    ] },
+    // { id: '1', label: 'Child 1', description: 'First child.', hidden: false, children: [] },
+    // { id: '2', label: 'Child 2', description: 'Second child.', hidden: false, children: [
+    //   { id: '2-1', label: 'Subchild 2-1', description: 'First subchild.', hidden: false, children: [] },
+    // ] },
   ],
 };
 
@@ -52,6 +52,7 @@ function App() {
   const ws = useRef<WebSocket | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const [hasFirstPromptBeenAnswered, setHasFirstPromptBeenAnswered] = useState(false);
   const [popupWindowProps, setPopupWindowProps] =
     useState<PopupWindowProps | null>(null);
 
@@ -109,6 +110,7 @@ function App() {
     ws.current = new WebSocket("ws://localhost:8000/ws");
     ws.current.onmessage = (event: MessageEvent) => {
         const obj = JSON.parse(event.data);
+        if (!hasFirstPromptBeenAnswered) setHasFirstPromptBeenAnswered(true);
         setMessages((msgs) => [...msgs, "tot: " + obj["output"]]);
         const tree = makeTreeFromData(obj.tree);
         // console.log('Received tree from server:', tree);    
@@ -228,10 +230,10 @@ function App() {
               </div>
             </div>
           </div>
-            {hasSentFirstMessage && (
+            {hasFirstPromptBeenAnswered && (
             <div
               className={`tree-transition${
-              hasSentFirstMessage ? " tree-transition--down" : ""
+              hasFirstPromptBeenAnswered ? " tree-transition--down" : ""
               }`}
             >
               <Tree

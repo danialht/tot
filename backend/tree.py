@@ -219,8 +219,8 @@ class SolverConfig:
     temperature: float = 0.7
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
-    reasoning_effort: str = "high"
-    max_tokens: int = 20000
+    reasoning_effort: str = "low"
+    max_tokens: int = 2000
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -1064,6 +1064,8 @@ class TreeOfThoughtSolver:
         # Synthesis prompt support
         self._synth_api_key = os.getenv("CEREBRAS_API_KEY")
         self._synth_base_url = "https://api.cerebras.ai/v1"
+        # Collected leaf candidates for post-hoc validation-based selection
+        self._leaf_candidates: List[Dict[str, Any]] = []
         
         # Public tree state attributes
         self.root_node: Optional[SubProblemNode] = None
@@ -1170,6 +1172,28 @@ class TreeOfThoughtSolver:
             self.root_node.terminal_status = "solved" if result.get("solved") else None
             # Expose packaged final answer with reasoning
             self.final_solution_text = package
+        
+        # Post-hoc: Evaluate all leaf candidates relative to the original problem and select highest score
+        try:
+            if self._leaf_candidates:
+                logger.info("\n🔎 Post-hoc validation over leaf candidates (original problem context)")
+                scored: List[Dict[str, Any]] = []
+                for cand in self._leaf_candidates:
+                    sol = cand.get("solution_text") or ""
+                    rsn = cand.get("reasoning_text") or ""
+                    score = await self._score_solution_via_validation(problem_text, sol, rsn)
+                    scored.append({**cand, "validation_score": score})
+                if scored:
+                    scored.sort(key=lambda c: c.get("validation_score") or 0.0, reverse=True)
+                    top = scored[0]
+                    logger.info(f"🏆 Highest-scoring leaf validation: {top.get('validation_score'):.3f}")
+                    # Override final with best validated leaf
+                    override_package = self._package_idea_solution_reasoning(None, top.get("solution_text") or "", top.get("reasoning_text") or "")
+                    self.root_node.state.candidate_solution = override_package
+                    self.final_solution_text = override_package
+                    self.root_candidates = scored
+        except Exception as e:
+            logger.warning(f"Leaf validation selection failed: {e}")
         else:
             self.root_node.state.candidate_solution = None
             self.root_node.terminal_status = None
@@ -1344,6 +1368,17 @@ class TreeOfThoughtSolver:
         for t in direct_candidates:
             sol_text = t.candidate or ""
             reasoning_text = build_reasoning(t)
+            # If this is a leaf node (mode == 'solve' and no further branching), collect globally
+            if mode == "solve":
+                try:
+                    self._leaf_candidates.append({
+                        "origin": "leaf",
+                        "solution_text": sol_text,
+                        "reasoning_text": reasoning_text,
+                        "path_idea": node.incoming_thought.text if node.incoming_thought else None
+                    })
+                except Exception:
+                    pass
             candidates.append({
                 "origin": "direct",
                 "idea_text": None,
@@ -1475,6 +1510,52 @@ class TreeOfThoughtSolver:
         except Exception as e:
             logger.warning(f"Synthesis error: {e}")
             return None
+
+    async def _score_solution_via_validation(self, problem_text: str, solution_text: str, reasoning_text: Optional[str]) -> float:
+        """Score a solution using the solution_validation prompt; parse Confidence as score."""
+        try:
+            combined = solution_text if not (reasoning_text and reasoning_text.strip()) else f"{solution_text}\n\nReasoning: {reasoning_text}"
+            prompt = PROMPTS["solution_validation"].format(problem=problem_text, solution=combined)
+            # Log the full validation prompt
+            logger.info("    🤖 LEAF SOLUTION VALIDATION:")
+            logger.info(f"    {'-'*50}")
+            for line in prompt.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {self._synth_api_key}", "Content-Type": "application/json"}
+                data = {
+                    "model": self.config.cerebras_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": self.config.temperature,
+                    "max_tokens": self.config.max_tokens
+                }
+                async with session.post(f"{self._synth_base_url}/chat/completions", headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status != 200:
+                        _ = await response.text()
+                        return 0.0
+                    result = await response.json()
+                    content = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
+            # Log the validation output
+            logger.info("    📥 VALIDATION OUTPUT:")
+            logger.info(f"    {'-'*50}")
+            for line in content.split('\n'):
+                logger.info(f"    {line}")
+            logger.info(f"    {'-'*50}")
+            m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", content, re.IGNORECASE)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    return max(0.0, min(1.0, val))
+                except Exception:
+                    return 0.0
+            # Fallback to Correct yes/no
+            c = re.search(r"Correct:\s*(yes|no)", content.lower())
+            if c and c.group(1) == "yes":
+                return 0.6
+            return 0.0
+        except Exception:
+            return 0.0
     
     async def _expand_node(self, node: SubProblemNode) -> List[SubProblemNode]:
         """Expand a node by generating and validating thoughts."""
@@ -1676,7 +1757,7 @@ async def main():
     PROBLEM5 = "What you might make to express an emotion; what you need to do with your problems to defeat them? Clue: 4 letter word with the last letter being e"
     PROBLEM6 = "What you might put out to ascertain where someone’s at? Clue: *E**E*"
     PROBLEM7 = "By sounding it out, and counting with your fingers, the answer will come. Clue: *A**U"
-    problem = PROBLEM7
+    problem = PROBLEM1
     logger.info(f"Problem: {problem}")
     logger.info("="*60)
     

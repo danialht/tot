@@ -49,10 +49,12 @@ function App() {
   const [lastUserPrompt, setLastUserPrompt] = useState<string>("");
   const [tree, setTree] = useState<TreeNode>(initialTree);
   const [hasSentFirstMessage, setHasSentFirstMessage] = useState(false);
+  const [hasFirstPromptBeenAnswered, setHasFirstPromptBeenAnswered] = useState(false);
+  const [isBotTyping, setIsBotTyping] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const ws = useRef<WebSocket | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const [hasFirstPromptBeenAnswered, setHasFirstPromptBeenAnswered] = useState(false);
   const [popupWindowProps, setPopupWindowProps] =
     useState<PopupWindowProps | null>(null);
 
@@ -100,6 +102,16 @@ function App() {
     }
   }, []);
 
+  // Apply theme to <html> for CSS variable overrides
+  React.useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'light') {
+      root.setAttribute('data-theme', 'light');
+    } else {
+      root.removeAttribute('data-theme');
+    }
+  }, [theme]);
+
   // Always scroll to bottom when messages change
   React.useEffect(() => {
     scrollChatToBottom();
@@ -111,6 +123,7 @@ function App() {
     ws.current.onmessage = (event: MessageEvent) => {
         const obj = JSON.parse(event.data);
         if (!hasFirstPromptBeenAnswered) setHasFirstPromptBeenAnswered(true);
+        setIsBotTyping(false);
         setMessages((msgs) => [...msgs, "tot: " + obj["output"]]);
         const tree = makeTreeFromData(obj.tree);
         // console.log('Received tree from server:', tree);    
@@ -130,6 +143,7 @@ function App() {
       setLastUserPrompt(input);
       setInput("");
       if (!hasSentFirstMessage) setHasSentFirstMessage(true);
+      setIsBotTyping(true);
     }
   };
 
@@ -141,14 +155,24 @@ function App() {
           onClose={() => setPopupWindowProps(null)}
           title={popupWindowProps.title}
           description={popupWindowProps.description}
+          children={null}
         />
       ) : (
         <div className="container">
+          {!hasFirstPromptBeenAnswered ? (
           <div
             className={`chatbox${
-              hasSentFirstMessage ? " chatbox--move-up" : ""
+              hasSentFirstMessage && !hasFirstPromptBeenAnswered ? " chatbox--move-up" : ""
             }`}
           >
+            <button
+              className="themeToggle"
+              onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+              aria-label="Toggle theme"
+              title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            >
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
             <h1 className="totTitle">TOT</h1>
             <div
               className="messages"
@@ -162,8 +186,22 @@ function App() {
                   {msg}
                 </div>
               ))}
+              {isBotTyping && (
+                <div className="message bot typingIndicator" aria-live="polite">
+                  <span className="typingDot" />
+                  <span className="typingDot" />
+                  <span className="typingDot" />
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
+            {hasSentFirstMessage && !hasFirstPromptBeenAnswered && (
+              <div className="skeleton">
+                <div className="skeleton-line" style={{ width: '70%' }} />
+                <div className="skeleton-line" style={{ width: '55%' }} />
+                <div className="skeleton-line" style={{ width: '62%' }} />
+              </div>
+            )}
             <div className="inputRow">
               <input
                 ref={inputRef}
@@ -230,23 +268,119 @@ function App() {
               </div>
             </div>
           </div>
-            {hasFirstPromptBeenAnswered && (
-            <div
-              className={`tree-transition${
-              hasFirstPromptBeenAnswered ? " tree-transition--down" : ""
-              }`}
-            >
-              <Tree
-              data={tree}
-              onNodeClick={(node) =>
-                setPopupWindowProps({
-                title: node.label,
-                description: node.description || "",
-                })
-              }
-              />
+          ) : (
+            <div className="splitLayout">
+              <div className="leftPane leftPane--enter">
+                <div className="chatbox">
+                  <button
+                    className="themeToggle"
+                    onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+                    aria-label="Toggle theme"
+                    title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+                  >
+                    {theme === 'dark' ? '☀️' : '🌙'}
+                  </button>
+                  <h1 className="totTitle">TOT</h1>
+                  <div
+                    className="messages"
+                    style={{ display: messages.length === 0 ? "none" : undefined }}
+                  >
+                    {messages.map((msg, i) => (
+                      <div
+                        key={i}
+                        className={"message " + (i % 2 === 0 ? "user" : "bot")}
+                      >
+                        {msg}
+                      </div>
+                    ))}
+                    {isBotTyping && (
+                      <div className="message bot typingIndicator" aria-live="polite">
+                        <span className="typingDot" />
+                        <span className="typingDot" />
+                        <span className="typingDot" />
+                      </div>
+                    )}
+                    <div ref={messagesEndRef} />
+                  </div>
+                  <div className="inputRow">
+                    <input
+                      ref={inputRef}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="Type a message..."
+                      className="input"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          sendMessage();
+                        } else if (
+                          e.key === "ArrowUp" &&
+                          document.activeElement === inputRef.current
+                        ) {
+                          if (lastUserPrompt) {
+                            setInput(lastUserPrompt);
+                            setTimeout(() => {
+                              inputRef.current?.setSelectionRange(
+                                lastUserPrompt.length,
+                                lastUserPrompt.length
+                              );
+                            }, 0);
+                          } else {
+                            const last = [...messages]
+                              .reverse()
+                              .find((m) => m.startsWith("You: "));
+                            if (last) {
+                              const prompt = last.slice(5);
+                              setInput(prompt);
+                              setTimeout(() => {
+                                inputRef.current?.setSelectionRange(
+                                  prompt.length,
+                                  prompt.length
+                                );
+                              }, 0);
+                            }
+                          }
+                          e.preventDefault();
+                        } else if (
+                          e.key === "ArrowDown" &&
+                          document.activeElement === inputRef.current
+                        ) {
+                          setInput("");
+                          e.preventDefault();
+                        }
+                      }}
+                    />
+                    <div className="buttonDropdownStack">
+                      <button
+                        onClick={sendMessage}
+                        disabled={!ws.current || !input}
+                        className="button"
+                      >
+                        Send
+                      </button>
+                      <select className="dropdown">
+                        <option value="option1">Normal</option>
+                        <option value="option2">Swift</option>
+                        <option value="option3">Genius</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="rightPane rightPane--enter">
+                <div className="treeScroll">
+                  <Tree
+                    data={tree}
+                    onNodeClick={(node) =>
+                      setPopupWindowProps({
+                        title: node.label,
+                        description: node.description || "",
+                      })
+                    }
+                  />
+                </div>
+              </div>
             </div>
-            )}
+          )}
         </div>
       )}
     </>

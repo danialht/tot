@@ -1,3 +1,32 @@
+:root {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --brand-start: #667eea;
+  --brand-end: #764ba2;
+  --bg-0: #0f0f23;
+  --bg-1: #1a1a2e;
+  --bg-2: #16213e;
+  --surface-0: rgba(255, 255, 255, 0.03);
+  --surface-1: rgba(255, 255, 255, 0.05);
+  --surface-2: rgba(255, 255, 255, 0.08);
+  --border-glass: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --text-primary: rgba(255, 255, 255, 0.95);
+  --text-secondary: rgba(255, 255, 255, 0.8);
+  --text-muted: rgba(255, 255, 255, 0.6);
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --space-1: 8px;
+  --space-2: 12px;
+  --space-3: 16px;
+  --space-4: 20px;
+  --space-5: 24px;
+  --space-6: 32px;
+}
+
 /* TOT Title Style */
 .totTitle {
   color: #fff;
@@ -25,7 +54,7 @@
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--brand-start);
   text-decoration: inherit;
 }
 a:hover {
@@ -38,6 +67,9 @@ body {
   place-items: center;
   min-width: 320px;
   min-height: 100vh;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background-color: var(--bg-1);
 }
 
 h1 {
@@ -62,6 +94,21 @@ button:hover {
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
+}
+
+/* Explicit theme override (manual toggle) */
+[data-theme="light"] {
+  --bg-0: #f5f7fb;
+  --bg-1: #ffffff;
+  --bg-2: #eef2fb;
+  --surface-0: rgba(0, 0, 0, 0.02);
+  --surface-1: rgba(0, 0, 0, 0.04);
+  --surface-2: rgba(0, 0, 0, 0.06);
+  --border-glass: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --text-primary: rgba(20, 24, 40, 0.95);
+  --text-secondary: rgba(20, 24, 40, 0.8);
+  --text-muted: rgba(20, 24, 40, 0.6);
 }
 
 @media (prefers-color-scheme: light) {

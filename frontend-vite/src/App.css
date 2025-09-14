@@ -2,7 +2,7 @@
 .totTitle {
   font-size: 3.5rem;
   font-weight: 800;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, var(--brand-start) 0%, var(--brand-end) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -21,11 +21,11 @@
 
 .dropdown {
   padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
   backdrop-filter: blur(10px);
-  color: #fff;
+  color: var(--text-primary);
   font-size: 0.9rem;
   font-family: inherit;
   font-weight: 500;
@@ -36,17 +36,17 @@
 
 .dropdown:hover {
   border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-2);
 }
 
 .dropdown:focus {
-  border-color: #667eea;
+  border-color: var(--brand-start);
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
 }
 
 .dropdown option {
-  background: #1a1a2e;
-  color: #fff;
+  background: var(--bg-1);
+  color: var(--text-primary);
 }
 .chatbox--move-up {
   transform: translateY(-20vh);
@@ -57,6 +57,82 @@
   padding: 2rem;
   text-align: center;
 }
+
+/* Split layout to position chat left and tree right */
+.splitLayout {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 4vh 4vw;
+  gap: 3vw;
+  box-sizing: border-box;
+  z-index: 1;
+}
+
+.leftPane, .rightPane {
+  flex: 1 1 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* Slight bias: give tree a bit more width */
+.rightPane { flex: 1.2 1 0; }
+.leftPane { flex: 0.8 1 0; }
+
+/* Enter animations */
+.leftPane--enter { animation: slideInLeft 600ms cubic-bezier(0.4,0,0.2,1) both; }
+.rightPane--enter { animation: slideInRight 600ms cubic-bezier(0.4,0,0.2,1) 80ms both; }
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Override chatbox when embedded in left pane */
+.leftPane .chatbox {
+  position: relative;
+  width: 100%;
+  max-width: none;
+  margin: 0 auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Make messages grow and scroll in pane */
+.leftPane .messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Scrollable tree area */
+.treeScroll {
+  position: relative;
+  background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.06);
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.treeScroll > div {
+  display: inline-block; /* Prevent canvas from stretching */
+}
+/* moved earlier */
 
 .logo {
   height: 6em;
@@ -98,12 +174,12 @@
   min-height: 100vh;
   min-width: 100vw;
   width: 100vw;
-  background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+  background: linear-gradient(135deg, var(--bg-0) 0%, var(--bg-1) 50%, var(--bg-2) 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   position: fixed;
   top: 0;
   left: 0;
@@ -123,19 +199,22 @@
     radial-gradient(circle at 80% 20%, rgba(255, 119, 198, 0.1) 0%, transparent 50%),
     radial-gradient(circle at 40% 40%, rgba(120, 219, 255, 0.05) 0%, transparent 50%);
   pointer-events: none;
+  animation: bg-pan 30s ease-in-out infinite alternate;
+}
+
+@keyframes bg-pan {
+  0% { transform: scale(1) translate(0, 0); }
+  100% { transform: scale(1.1) translate(-1%, -1%); }
 }
 
 .chatbox {
   transition: transform 0.8s cubic-bezier(0.4,0,0.2,1);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-1);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border-glass);
   position: fixed;
-  border-radius: 24px;
-  box-shadow: 
-    0 8px 32px rgba(0, 0, 0, 0.3),
-    0 0 0 1px rgba(255, 255, 255, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.1);
   padding: 40px;
   width: 70vw;
   max-width: 1020px;
@@ -146,13 +225,69 @@
   z-index: 1;
 }
 
+/* Theme toggle button */
+.themeToggle {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-glass);
+  color: var(--text-primary);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Typing indicator */
+.typingIndicator {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.typingDot {
+  width: 6px;
+  height: 6px;
+  background: rgba(255,255,255,0.8);
+  border-radius: 50%;
+  display: inline-block;
+  animation: bounce 1s infinite ease-in-out;
+}
+.typingDot:nth-child(2) { animation-delay: 0.15s; }
+.typingDot:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* Chat skeleton while waiting */
+.skeleton {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.skeleton-line {
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.12), rgba(255,255,255,0.05));
+  animation: shimmer 1.2s infinite;
+}
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: 200px 0; }
+}
+
 .messages {
     min-height: 200px;
     max-height: 280px;
     overflow-y: auto;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    background: var(--surface-0);
     backdrop-filter: blur(10px);
     padding: 20px;
     margin-bottom: 12px;
@@ -184,15 +319,21 @@
   margin: 8px 0;
   max-width: 80%;
   word-break: break-word;
-  color: #fff;
+  color: var(--text-primary);
   text-align: left;
   align-self: flex-start;
   font-size: 0.95rem;
   line-height: 1.4;
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  border: 1px solid var(--border-glass);
+  box-shadow: var(--shadow-sm);
   transition: all 0.2s ease;
+  animation: message-in 240ms ease both;
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .message:hover {
@@ -201,13 +342,13 @@
 }
 
 .message.user {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, var(--brand-start) 0%, var(--brand-end) 100%);
   align-self: flex-end;
   border: 1px solid rgba(102, 126, 234, 0.3);
 }
 
 .message.bot {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-2);
   align-self: flex-start;
   border: 1px solid rgba(255, 255, 255, 0.15);
 }
@@ -222,13 +363,13 @@
 .input {
   flex: 1;
   padding: 16px 20px;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
   font-size: 1rem;
   outline: none;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-1);
   backdrop-filter: blur(10px);
-  color: #fff;
+  color: var(--text-primary);
   height: auto;
   min-height: 56px;
   box-sizing: border-box;
@@ -237,20 +378,20 @@
 }
 
 .input::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-muted);
 }
 
 .input:focus {
-  border-color: #667eea;
+  border-color: var(--brand-start);
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-2);
 }
 
 .button {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, var(--brand-start) 0%, var(--brand-end) 100%);
   color: #fff;
   border: none;
-  border-radius: 16px;
+  border-radius: var(--radius-md);
   padding: 16px 24px;
   font-weight: 600;
   font-size: 1rem;

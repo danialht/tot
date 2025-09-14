@@ -9,7 +9,7 @@ from tree import SolverConfig, create_default_solver
 
 from dotenv import load_dotenv
 load_dotenv()
-TEST_MODE = True
+TEST_MODE = False
 app = FastAPI()
 
 # Allow CORS for local frontend
@@ -74,7 +74,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 continue
             
-            output = await solver.solve(data, log=True)
+            output = await solver.solve(data, log=False)
             
             if not solver.root_node:
                 await websocket.send_text(f"Solver not initialized")

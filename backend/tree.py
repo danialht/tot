@@ -345,7 +345,7 @@ class ProposeThoughtGenerator(ThoughtGenerator):
         
         # Hints for counts
         max_hint = str(max_ideas) if max_ideas else "3"
-        up_to_hint = str(max_ideas) if max_ideas else "5"
+        up_to_hint = str(max_ideas) if max_ideas else "3"
         
         # Prefer flexible idea-or-direct generation; fall back if missing
         template = PROMPTS.get("idea_or_direct_generation")
@@ -1112,7 +1112,7 @@ class TreeOfThoughtSolver:
         self.root_candidates = []
         
         # Hard cap depth at 5 as requested
-        depth_cap = 5
+        depth_cap = self.config.max_depth
         
         # Compute best solution text recursively from root context
         result = await self._compute_best_recursive(self.root_node, depth_cap)

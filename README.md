@@ -16,11 +16,11 @@ A modern web application implementing and improving upon the **Tree of Thoughts*
 
 ![Image 1](images/Screenshot%202025-09-14%20at%2012.12.32 PM.png)
 
-![Image 2](images/Screenshot%202025-09-14%20at%2012.12.45%20PM.png)
+![Image 2](images/Screenshot%202025-09-14%20at%2012.12.45 PM.png)
 
-![Image 3](images/Screenshot%202025-09-14%20at%2012.13.05%20PM.png)
+![Image 3](images/Screenshot%202025-09-14%20at%2012.13.05 PM.png)
 
-![image 4](images/Screenshot%202025-09-14%20at%2012.13.14%20PM.png)
+![image 4](images/Screenshot%202025-09-14%20at%2012.13.14 PM.png)
 
 ## Overview
 

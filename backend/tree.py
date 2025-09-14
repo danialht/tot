@@ -220,7 +220,8 @@ class SolverConfig:
     max_retries: int = 2
     cerebras_model: str = "gpt-oss-120b"
     reasoning_effort: str = "low"
-    max_tokens: int = 5000
+    max_tokens: int = 2000
+    candidate_selection_mode: str = "validation"  # "validation" | "synthesis"
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -238,6 +239,8 @@ class SolverConfig:
             raise ValueError(f"max_ideas_hint_per_node must be positive or None, got {self.max_ideas_hint_per_node}")
         if self.max_tokens <= 0:
             raise ValueError(f"max_tokens must be positive, got {self.max_tokens}")
+        if self.candidate_selection_mode not in {"validation", "synthesis"}:
+            raise ValueError(f"candidate_selection_mode must be 'validation' or 'synthesis', got {self.candidate_selection_mode}")
 
 
 # ============================================================================
@@ -1064,8 +1067,7 @@ class TreeOfThoughtSolver:
         # Synthesis prompt support
         self._synth_api_key = os.getenv("CEREBRAS_API_KEY")
         self._synth_base_url = "https://api.cerebras.ai/v1"
-        # Collected leaf candidates for post-hoc validation-based selection
-        self._leaf_candidates: List[Dict[str, Any]] = []
+        # Leaf post-hoc override removed; selection is per-node based on mode
         
         # Public tree state attributes
         self.root_node: Optional[SubProblemNode] = None
@@ -1173,27 +1175,7 @@ class TreeOfThoughtSolver:
             # Expose packaged final answer with reasoning
             self.final_solution_text = package
         
-        # Post-hoc: Evaluate all leaf candidates relative to the original problem and select highest score
-        try:
-            if self._leaf_candidates:
-                logger.info("\n🔎 Post-hoc validation over leaf candidates (original problem context)")
-                scored: List[Dict[str, Any]] = []
-                for cand in self._leaf_candidates:
-                    sol = cand.get("solution_text") or ""
-                    rsn = cand.get("reasoning_text") or ""
-                    score = await self._score_solution_via_validation(problem_text, sol, rsn)
-                    scored.append({**cand, "validation_score": score})
-                if scored:
-                    scored.sort(key=lambda c: c.get("validation_score") or 0.0, reverse=True)
-                    top = scored[0]
-                    logger.info(f"🏆 Highest-scoring leaf validation: {top.get('validation_score'):.3f}")
-                    # Override final with best validated leaf
-                    override_package = self._package_idea_solution_reasoning(None, top.get("solution_text") or "", top.get("reasoning_text") or "")
-                    self.root_node.state.candidate_solution = override_package
-                    self.final_solution_text = override_package
-                    self.root_candidates = scored
-        except Exception as e:
-            logger.warning(f"Leaf validation selection failed: {e}")
+        # No post-hoc leaf override; selection handled per-node based on mode
         else:
             self.root_node.state.candidate_solution = None
             self.root_node.terminal_status = None
@@ -1405,25 +1387,43 @@ class TreeOfThoughtSolver:
                 "tie_score": float(child_info.get("idea_score") or 0.0)
             })
         
-        # If we have multiple candidates (or one), synthesize a single best answer
         best_candidate: Optional[Dict[str, Any]] = None
         if candidates:
-            logger.info(f"{indent}🧪 Synthesizing across {len(candidates)} candidate(s)")
-            synthesis = await self._synthesize_candidates(parent_problem, candidates)
-            if synthesis and synthesis.get("solution_text"):
-                best_candidate = {
-                    "origin": "synthesized",
-                    "idea_text": None,
-                    "solution_text": synthesis.get("solution_text"),
-                    "reasoning_text": synthesis.get("reasoning_text"),
-                    "solved": True,
-                    "quality": synthesis.get("quality") or 0.0,
-                    "tie_score": 0.0
-                }
-                logger.info(f"{indent}🏆 Synthesized candidate selected")
+            mode_selection = self.config.candidate_selection_mode
+            if mode_selection == "synthesis":
+                logger.info(f"{indent}🧪 Synthesizing across {len(candidates)} candidate(s)")
+                synthesis = await self._synthesize_candidates(parent_problem, candidates)
+                if synthesis and synthesis.get("solution_text"):
+                    best_candidate = {
+                        "origin": "synthesized",
+                        "idea_text": None,
+                        "solution_text": synthesis.get("solution_text"),
+                        "reasoning_text": synthesis.get("reasoning_text"),
+                        "solved": True,
+                        "quality": synthesis.get("quality") or 0.0,
+                        "tie_score": 0.0
+                    }
+                    logger.info(f"{indent}🏆 Synthesized candidate selected")
+                else:
+                    logger.warning(f"{indent}Synthesis failed; falling back to first candidate")
+                    best_candidate = candidates[0]
             else:
-                logger.warning(f"{indent}Synthesis failed to produce an answer; falling back")
-                best_candidate = candidates[0]
+                # validation mode: evaluate candidates relative to parent problem
+                logger.info(f"{indent}🧪 Validating {len(candidates)} candidate(s)")
+                validated: List[Dict[str, Any]] = []
+                for c in candidates:
+                    sol_text = c.get("solution_text") or ""
+                    rsn_text = c.get("reasoning_text") or ""
+                    # Use signed confidence score for ranking
+                    signed_score = await self._score_solution_via_validation(parent_problem, sol_text, rsn_text)
+                    cc = dict(c)
+                    cc["signed_score"] = signed_score
+                    validated.append(cc)
+                def rank_key(c: Dict[str, Any]):
+                    return (c.get("signed_score") or 0.0, c.get("tie_score") or 0.0)
+                validated.sort(key=rank_key, reverse=True)
+                best_candidate = validated[0]
+                logger.info(f"{indent}🏆 Selected candidate (signed_score={best_candidate.get('signed_score')})")
         else:
             logger.info(f"{indent}❌ No candidates produced at this node")
         
@@ -1542,18 +1542,25 @@ class TreeOfThoughtSolver:
             for line in content.split('\n'):
                 logger.info(f"    {line}")
             logger.info(f"    {'-'*50}")
-            m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", content, re.IGNORECASE)
-            if m:
+            # Parse Correct and Confidence
+            correct_match = re.search(r"Correct:\s*(yes|no)", content, re.IGNORECASE)
+            conf_match = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", content, re.IGNORECASE)
+            conf_val: Optional[float] = None
+            if conf_match:
                 try:
-                    val = float(m.group(1))
-                    return max(0.0, min(1.0, val))
+                    conf_val = float(conf_match.group(1))
+                    conf_val = max(0.0, min(1.0, conf_val))
                 except Exception:
-                    return 0.0
-            # Fallback to Correct yes/no
-            c = re.search(r"Correct:\s*(yes|no)", content.lower())
-            if c and c.group(1) == "yes":
-                return 0.6
-            return 0.0
+                    conf_val = None
+            if correct_match:
+                is_yes = correct_match.group(1).strip().lower() == "yes"
+                if is_yes:
+                    return conf_val if conf_val is not None else 0.6
+                else:
+                    # Negative confidence if incorrect
+                    return -(conf_val if conf_val is not None else 0.6)
+            # No explicit Correct field: use confidence if present, else 0.0
+            return conf_val if conf_val is not None else 0.0
         except Exception:
             return 0.0
     

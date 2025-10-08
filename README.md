@@ -1,6 +1,6 @@
-# Tree of Thoughts (ToT) Implementation
+# A Visual Tree of Thoughts (ToT)
 
-A modern web application implementing and improving upon the **Tree of Thoughts** framework for deliberate problem solving with Large Language Models, as described in the research paper by Yao et al.
+A web application implementing and improving upon the **Tree of Thoughts** framework for deliberate problem solving with Large Language Models, as described in the research paper by Yao et al.
 
 > **Paper Reference**: [Tree of Thoughts: Deliberate Problem Solving with Large Language Models](https://arxiv.org/abs/2305.10601)  
 > **Authors**: Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Thomas L. Griffiths, Yuan Cao, Karthik Narasimhan  
